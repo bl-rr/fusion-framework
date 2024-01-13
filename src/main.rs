@@ -1,14 +1,24 @@
+use async_trait::async_trait;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ops::AddAssign;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, RwLock};
 
 /* Type Aliases */
 type VertexID = u32;
 type MachineID = u32;
-
-pub struct Data<T: DeserializeOwned>(pub T);
+type DummyID = u32;
 
 /* struct definitions */
+
+/*
+   Data Wrapper
+*/
+pub struct Data<T: DeserializeOwned>(pub T);
 
 /* VertexType
    A vertex is either
@@ -36,12 +46,12 @@ impl<T: DeserializeOwned> Vertex<T> {
             T: the output of the UDF, needs to be deserializable for rpc
             F: UDF that defines the execute function
     */
-    pub fn apply_function<F: UserDefinedFunction<T>>(&self, udf: &F, graph: &Graph<T>) -> T {
+    pub async fn apply_function<F: UserDefinedFunction<T>>(&self, udf: &F, graph: &Graph<T>) -> T {
         match &self.v_type {
-            VertexType::Local(_) | VertexType::Borrowed(_) => udf.execute(&self, graph),
+            VertexType::Local(_) | VertexType::Borrowed(_) => udf.execute(&self, graph).await,
             VertexType::Remote(remote_vertex) => {
                 // Delegate to the remote machine: rpc here
-                remote_vertex.remote_execute(self.id)
+                remote_vertex.remote_execute(self.id, graph).await
             }
         }
     }
@@ -146,35 +156,57 @@ impl<T: DeserializeOwned> LocalVertex<T> {
    Remote References to other vertices
 */
 pub struct RemoteVertex {
-    id: VertexID,
     location: MachineID,
 }
 impl RemoteVertex {
     /*
        Constructor
     */
-    pub fn new(id: VertexID, location: MachineID) -> Self {
-        Self { id, location }
+    pub fn new(location: MachineID) -> Self {
+        Self { location }
     }
 
     /*
        RPC
     */
-    fn remote_execute<T>(&self, vertex_id: VertexID) -> T
+    async fn remote_execute<T>(&self, vertex_id: VertexID, graph: &Graph<T>) -> T
     where
         T: DeserializeOwned,
     {
-        // Implement RPC to send the function and necessary data to the remote machine.
         // The remote machine executes the function and returns the result.
 
-        // should receive bytes
-        // let result : vec<u8> = todo();
+        println!("starting remote Execute");
 
-        let result_bytes: Vec<u8> = 100isize.to_ne_bytes().to_vec();
-        if result_bytes.len() != std::mem::size_of::<T>() {
-            panic!()
-        }
+        let rpc_sending_streams = graph.rpc_sending_streams.read().await;
+        let mut rpc_sending_stream = rpc_sending_streams
+            .get(&self.location)
+            .unwrap()
+            .lock()
+            .await;
 
+        let command = bincode::serialize(&RPC::Execute(vertex_id, 0)).unwrap();
+        // let command = bincode::serialize(&RPC::Relay(vertex_id, 0)).unwrap();
+        // let _command = bincode::serialize(&RPC::Relay(vertex_id, 1)).unwrap();
+        // println!("Sent Size Is for command: {}", command.len());
+        // println!("Sent Size Is for _command: {}", _command.len());
+
+        rpc_sending_stream.write_all(&command).await.unwrap();
+
+        println!("sent rpc command to {}", self.location);
+        drop(rpc_sending_stream);
+        drop(rpc_sending_streams);
+
+        let mut result_bytes = vec![0u8; std::mem::size_of::<T>()];
+
+        let receiving_streams = graph.receiving_streams.read().await;
+        let mut receiving_stream = receiving_streams.get(&self.location).unwrap().lock().await;
+
+        receiving_stream
+            .read_exact(&mut result_bytes)
+            .await
+            .unwrap();
+
+        println!("received rpc response");
         bincode::deserialize(&result_bytes).unwrap()
     }
 }
@@ -193,6 +225,9 @@ pub enum VertexKind {
 */
 pub struct Graph<T: DeserializeOwned> {
     vertex_map: HashMap<VertexID, Vertex<T>>,
+    sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
+    receiving_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
+    rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
 }
 
 impl<T: DeserializeOwned> Graph<T> {
@@ -202,6 +237,9 @@ impl<T: DeserializeOwned> Graph<T> {
     pub fn new() -> Self {
         Graph {
             vertex_map: HashMap::new(),
+            sending_streams: RwLock::new(HashMap::new()),
+            receiving_streams: RwLock::new(HashMap::new()),
+            rpc_sending_streams: RwLock::new(HashMap::new()),
         }
     }
 
@@ -237,7 +275,7 @@ impl<T: DeserializeOwned> Graph<T> {
                 let location = location.expect("Remote vertex must have a location.");
                 Vertex {
                     id,
-                    v_type: VertexType::Remote(RemoteVertex::new(id, location)),
+                    v_type: VertexType::Remote(RemoteVertex::new(location)),
                 }
             }
             VertexKind::Borrowed => Vertex {
@@ -259,11 +297,21 @@ impl<T: DeserializeOwned> Graph<T> {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub enum RPC {
+    Execute(VertexID, DummyID),
+    Relay(VertexID, MachineID),
+    RequestData(VertexID, DummyID),
+    ExecuteWithData(VertexID, DummyID),
+    Update(VertexID, DummyID),
+}
+
 /*
    Trait of user-defined function requirements
 */
+#[async_trait]
 pub trait UserDefinedFunction<T: DeserializeOwned> {
-    fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>) -> T;
+    async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>) -> T;
 }
 
 /* *********** Starting of User's Playground *********** */
@@ -279,50 +327,242 @@ impl AddAssign<isize> for Data<isize> {
 
 // UDF Struct
 struct GraphSum;
+#[async_trait]
 impl UserDefinedFunction<isize> for GraphSum {
-    fn execute(&self, vertex: &Vertex<isize>, graph: &Graph<isize>) -> isize {
+    async fn execute(&self, vertex: &Vertex<isize>, graph: &Graph<isize>) -> isize {
         let mut count = Data(0);
         count += vertex.get_val().as_ref().unwrap().0;
 
         for sub_graph_root_id in vertex.children().iter() {
             count += graph
-                .vertex_map
                 .get(sub_graph_root_id)
                 .expect("node not found")
-                .apply_function(self, graph);
+                .apply_function(self, graph)
+                .await;
         }
         count.0
     }
 }
 
 // custom graph builder for testing
-fn build_graph(graph: &mut Graph<isize>) {
-    // Root vertex
-    graph.add_new_vertex(0, &[], &[1, 2], Some(Data(1)), VertexKind::Local, None);
+fn build_graph(graph: &mut Graph<isize>, machine_id: MachineID) {
+    match machine_id {
+        1 => {
+            // Root vertex
+            graph.add_new_vertex(0, &[], &[1, 2], Some(Data(1)), VertexKind::Local, None);
 
-    // First level children
-    graph.add_new_vertex(1, &[0], &[3, 4], Some(Data(2)), VertexKind::Local, None);
-    graph.add_new_vertex(2, &[0], &[5, 6], Some(Data(3)), VertexKind::Local, None);
+            // First level children
+            graph.add_new_vertex(1, &[0], &[3, 4], Some(Data(2)), VertexKind::Local, None);
+            graph.add_new_vertex(2, &[0], &[5, 6], Some(Data(3)), VertexKind::Local, None);
 
-    // Second level children
-    graph.add_new_vertex(3, &[1], &[], Some(Data(4)), VertexKind::Local, None);
-    graph.add_new_vertex(4, &[1], &[7, 8, 9], Some(Data(5)), VertexKind::Local, None);
-    graph.add_new_vertex(5, &[2], &[], Some(Data(6)), VertexKind::Local, None);
-    graph.add_new_vertex(6, &[2], &[], Some(Data(7)), VertexKind::Local, None);
+            // Second level children
+            graph.add_new_vertex(3, &[1], &[], Some(Data(4)), VertexKind::Local, None);
+            graph.add_new_vertex(4, &[1], &[7, 8, 9], Some(Data(5)), VertexKind::Local, None);
+            graph.add_new_vertex(5, &[2], &[], Some(Data(6)), VertexKind::Local, None);
+            graph.add_new_vertex(6, &[2], &[], Some(Data(7)), VertexKind::Local, None);
 
-    // Third level child
-    graph.add_new_vertex(7, &[4], &[], Some(Data(8)), VertexKind::Local, None);
-    graph.add_new_vertex(8, &[4], &[], None, VertexKind::Remote, Some(1));
-    graph.add_new_vertex(9, &[4], &[], None, VertexKind::Remote, Some(2));
-    // Add more vertices as required
+            // Third level child
+            graph.add_new_vertex(7, &[4], &[], Some(Data(8)), VertexKind::Local, None);
+            graph.add_new_vertex(8, &[4], &[], None, VertexKind::Remote, Some(2));
+            graph.add_new_vertex(9, &[4], &[], None, VertexKind::Remote, Some(2));
+        }
+        2 => {
+            // Root vertex
+            graph.add_new_vertex(8, &[], &[10, 11], Some(Data(100)), VertexKind::Local, None);
+            graph.add_new_vertex(9, &[], &[12, 13], Some(Data(200)), VertexKind::Local, None);
+
+            // First level children
+            graph.add_new_vertex(10, &[8], &[], Some(Data(300)), VertexKind::Local, None);
+            graph.add_new_vertex(11, &[8], &[], Some(Data(400)), VertexKind::Local, None);
+            graph.add_new_vertex(12, &[9], &[], Some(Data(500)), VertexKind::Local, None);
+            graph.add_new_vertex(13, &[9], &[], Some(Data(600)), VertexKind::Local, None);
+        }
+        _ => {
+            unimplemented!()
+        }
+    }
 }
 
-fn main() {
+async fn handle_node(mut stream: TcpStream) {
+    let mut buffer = [0; 1024];
+    loop {
+        match stream.read(&mut buffer).await {
+            Ok(size) if size == 0 => return, // Connection was closed
+            Ok(size) => {
+                stream
+                    .write_all(&buffer[..size])
+                    .await
+                    .expect("Failed to write to stream");
+            }
+            Err(e) => {
+                eprintln!("An error occurred: {}", e);
+                return;
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 2 {
+        eprintln!("Usage: {} <machine_id>", args[0]);
+        std::process::exit(1);
+    }
+    let machine_id: MachineID = args[1].parse().expect("Invalid machine ID");
+
+    let base_port = 8080;
+    let local_port = base_port + machine_id;
+    let remote_port = base_port + if machine_id == 1 { 2 } else { 1 };
+    let local_address = format!("127.0.0.1:{}", local_port);
+    let remote_address = format!("127.0.0.1:{}", remote_port);
+
+    let mut rpc_receiving_streams = HashMap::new();
+
+    // Start listening on the local port
+    let listener = TcpListener::bind(&local_address)
+        .await
+        .expect("Failed to bind local address");
+    println!("Listening on {}", local_address);
+
     let mut graph = Graph::new();
-    build_graph(&mut graph);
 
-    // Apply function and print result
-    let result = graph.get(&0).unwrap().apply_function(&GraphSum, &graph);
+    match machine_id {
+        1 => {
+            let (incoming_stream, socket_addr) = listener
+                .accept()
+                .await
+                .expect("Failed to accept connection");
+            println!("New connection from {socket_addr}");
 
-    println!("The graph sum is: {result}");
+            let (rpc_receiving_stream, socket_addr) = listener
+                .accept()
+                .await
+                .expect("Failed to accept connection");
+            println!("New connection from {socket_addr}");
+
+            rpc_receiving_streams.insert(2, rpc_receiving_stream);
+
+            let outgoing_stream = TcpStream::connect(&remote_address)
+                .await
+                .expect(&*format!("Failed to connect to {remote_address}"));
+            let rpc_sending_stream = TcpStream::connect(&remote_address)
+                .await
+                .expect(&*format!("Failed to connect to {remote_address}"));
+
+            graph
+                .sending_streams
+                .write()
+                .await
+                .insert(2, Mutex::new(outgoing_stream));
+            graph
+                .receiving_streams
+                .write()
+                .await
+                .insert(2, Mutex::new(incoming_stream));
+            graph
+                .rpc_sending_streams
+                .write()
+                .await
+                .insert(2, Mutex::new(rpc_sending_stream));
+        }
+        2 => {
+            let outgoing_stream = TcpStream::connect(&remote_address)
+                .await
+                .expect(&*format!("Failed to connect to {remote_address}"));
+
+            let rpc_sending_stream = TcpStream::connect(&remote_address)
+                .await
+                .expect(&*format!("Failed to connect to {remote_address}"));
+
+            let (incoming_stream, socket_addr) = listener
+                .accept()
+                .await
+                .expect("Failed to accept connection");
+
+            println!("New connection from {socket_addr}");
+
+            let (rpc_receiving_stream, socket_addr) = listener
+                .accept()
+                .await
+                .expect("Failed to accept connection");
+            println!("New connection from {socket_addr}");
+
+            rpc_receiving_streams.insert(1, rpc_receiving_stream);
+
+            graph
+                .sending_streams
+                .write()
+                .await
+                .insert(1, Mutex::new(outgoing_stream));
+            graph
+                .receiving_streams
+                .write()
+                .await
+                .insert(1, Mutex::new(incoming_stream));
+            graph
+                .rpc_sending_streams
+                .write()
+                .await
+                .insert(1, Mutex::new(rpc_sending_stream));
+        }
+        _ => unimplemented!(),
+    }
+
+    println!("Simulation TCP Set Up Complete");
+
+    build_graph(&mut graph, machine_id);
+
+    let graph = Arc::new(graph);
+
+    for (id, mut stream) in rpc_receiving_streams.into_iter() {
+        let graph = graph.clone();
+        tokio::spawn(async move {
+            let mut cmd = vec![0u8; std::mem::size_of::<RPC>()];
+            println!("Size is {}", std::mem::size_of::<RPC>());
+            // let mut _cmd = vec![0u8; 1];
+            while let Ok(_) = stream.read_exact(&mut cmd).await {
+                println!("rpc receiving stream received command");
+                match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
+                    RPC::Execute(v_id, _) => {
+                        println!("received plain remote execute");
+                        let res = graph
+                            .get(&v_id)
+                            .unwrap()
+                            .apply_function(&GraphSum, &graph)
+                            .await;
+                        println!("remote execute finished");
+                        let sending_streams = graph.sending_streams.read().await;
+                        let mut sending_stream = sending_streams.get(&id).unwrap().lock().await;
+                        sending_stream
+                            .write_all(&bincode::serialize(&res).unwrap())
+                            .await
+                            .unwrap();
+                        println!("send remote execute response");
+                    }
+                    RPC::Relay(_, _) => {
+                        unimplemented!()
+                    }
+                    RPC::RequestData(_, _) => {
+                        unimplemented!()
+                    }
+                    RPC::ExecuteWithData(_, _) => {
+                        unimplemented!()
+                    }
+                    RPC::Update(_, _) => {
+                        unimplemented!()
+                    }
+                }
+            }
+        });
+    }
+
+    if machine_id == 1 {
+        // Apply function and print result
+        let root = graph.get(&0).unwrap();
+        let result = root.apply_function(&GraphSum, &graph).await;
+        println!("The graph sum is: {result}");
+    }
+
+    loop {}
 }
