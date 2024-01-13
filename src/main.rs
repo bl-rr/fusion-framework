@@ -8,16 +8,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
 
-/* Type Aliases */
+/* *********** Type Aliases *********** */
 type VertexID = u32;
 type MachineID = u32;
-type DummyID = u32;
 
-/* struct definitions */
+/* *********** struct definitions *********** */
 
 /*
    Data Wrapper
 */
+#[derive(Serialize)]
 pub struct Data<T: DeserializeOwned>(pub T);
 
 /* VertexType
@@ -26,7 +26,8 @@ pub struct Data<T: DeserializeOwned>(pub T);
         2)  remote:     remote reference of vertex that lives on another machine/core/node
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
-pub enum VertexType<T: DeserializeOwned> {
+#[derive(Serialize)]
+pub enum VertexType<T: DeserializeOwned + Serialize> {
     Local(LocalVertex<T>),
     Remote(RemoteVertex),
     Borrowed(LocalVertex<T>),
@@ -35,11 +36,12 @@ pub enum VertexType<T: DeserializeOwned> {
 /*
    Vertex
 */
-pub struct Vertex<T: DeserializeOwned> {
+#[derive(Serialize)]
+pub struct Vertex<T: DeserializeOwned + Serialize> {
     id: VertexID,
     v_type: VertexType<T>,
 }
-impl<T: DeserializeOwned> Vertex<T> {
+impl<T: DeserializeOwned + Serialize> Vertex<T> {
     /*
         User-Defined_Function Invoker
 
@@ -83,6 +85,7 @@ impl<T: DeserializeOwned> Vertex<T> {
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
+#[derive(Serialize)]
 pub struct LocalVertex<T: DeserializeOwned> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
@@ -155,6 +158,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
 /*
    Remote References to other vertices
 */
+#[derive(Serialize)]
 pub struct RemoteVertex {
     location: MachineID,
 }
@@ -171,7 +175,7 @@ impl RemoteVertex {
     */
     async fn remote_execute<T>(&self, vertex_id: VertexID, graph: &Graph<T>) -> T
     where
-        T: DeserializeOwned,
+        T: DeserializeOwned + Serialize,
     {
         // The remote machine executes the function and returns the result.
 
@@ -184,7 +188,7 @@ impl RemoteVertex {
             .lock()
             .await;
 
-        let command = bincode::serialize(&RPC::Execute(vertex_id, 0)).unwrap();
+        let command = bincode::serialize(&RPC::Execute(vertex_id)).unwrap();
         // let command = bincode::serialize(&RPC::Relay(vertex_id, 0)).unwrap();
         // let _command = bincode::serialize(&RPC::Relay(vertex_id, 1)).unwrap();
         // println!("Sent Size Is for command: {}", command.len());
@@ -223,14 +227,14 @@ pub enum VertexKind {
 /*
     Graph Class that stores the (vertex_id -> vertex) mapping, acting as pointers to vertices
 */
-pub struct Graph<T: DeserializeOwned> {
+pub struct Graph<T: DeserializeOwned + Serialize> {
     vertex_map: HashMap<VertexID, Vertex<T>>,
     sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     receiving_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
 }
 
-impl<T: DeserializeOwned> Graph<T> {
+impl<T: DeserializeOwned + Serialize> Graph<T> {
     /*
        Constructor
     */
@@ -298,19 +302,30 @@ impl<T: DeserializeOwned> Graph<T> {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct RPCRelay {
+    machine_id: MachineID, // Use this field only when needed
+}
+
+#[derive(Serialize)]
+pub struct RPCData<T: Serialize + DeserializeOwned> {
+    id: VertexID,
+    data: Vertex<T>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub enum RPC {
-    Execute(VertexID, DummyID),
-    Relay(VertexID, MachineID),
-    RequestData(VertexID, DummyID),
-    ExecuteWithData(VertexID, DummyID),
-    Update(VertexID, DummyID),
+    Execute(VertexID),
+    Relay(VertexID),
+    RequestData(VertexID),
+    ExecuteWithData(VertexID),
+    Update(VertexID),
 }
 
 /*
    Trait of user-defined function requirements
 */
 #[async_trait]
-pub trait UserDefinedFunction<T: DeserializeOwned> {
+pub trait UserDefinedFunction<T: DeserializeOwned + Serialize> {
     async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>) -> T;
 }
 
@@ -524,7 +539,7 @@ async fn main() {
             while let Ok(_) = stream.read_exact(&mut cmd).await {
                 println!("rpc receiving stream received command");
                 match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
-                    RPC::Execute(v_id, _) => {
+                    RPC::Execute(v_id) => {
                         println!("received plain remote execute");
                         let res = graph
                             .get(&v_id)
@@ -540,16 +555,16 @@ async fn main() {
                             .unwrap();
                         println!("send remote execute response");
                     }
-                    RPC::Relay(_, _) => {
+                    RPC::Relay(_) => {
                         unimplemented!()
                     }
-                    RPC::RequestData(_, _) => {
+                    RPC::RequestData(_) => {
                         unimplemented!()
                     }
-                    RPC::ExecuteWithData(_, _) => {
+                    RPC::ExecuteWithData(_) => {
                         unimplemented!()
                     }
-                    RPC::Update(_, _) => {
+                    RPC::Update(_) => {
                         unimplemented!()
                     }
                 }
