@@ -1,5 +1,5 @@
 /* lib.rs
-   Amalgamation of imports, to keep everything under the same crate root. 
+   Amalgamation of imports, to keep everything under the same crate root.
    Also includes all information users should need when constructing the custom function
 
    Author: Binghong(Leo) Li
@@ -22,6 +22,6 @@ pub mod vertex;
    Trait requirement for user-defined functions
 */
 #[async_trait]
-pub trait UserDefinedFunction<T: DeserializeOwned + Serialize> {
-    async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>) -> T;
+pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U> {
+    async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>, auxiliary_information: U) -> T;
 }

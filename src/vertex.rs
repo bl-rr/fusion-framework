@@ -52,9 +52,16 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             T: the output of the UDF, needs to be deserializable for rpc
             F: UDF that defines the execute function
     */
-    pub async fn apply_function<F: UserDefinedFunction<T>>(&self, udf: &F, graph: &Graph<T>) -> T {
+    pub async fn apply_function<F: UserDefinedFunction<T, U>, U>(
+        &self,
+        udf: &F,
+        graph: &Graph<T>,
+        auxiliary_information: U,
+    ) -> T {
         match &self.v_type {
-            VertexType::Local(_) | VertexType::Borrowed(_) => udf.execute(&self, graph).await,
+            VertexType::Local(_) | VertexType::Borrowed(_) => {
+                udf.execute(&self, graph, auxiliary_information).await
+            }
             VertexType::Remote(remote_vertex) => {
                 // Delegate to the remote machine: rpc here
                 remote_vertex.remote_execute(self.id, graph).await

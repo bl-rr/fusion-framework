@@ -149,7 +149,7 @@ async fn main() {
     if machine_id == 1 {
         // Apply function and print result
         let root = graph.get(&0).unwrap();
-        let result = root.apply_function(&GraphSum, &graph).await;
+        let result = root.apply_function(&GraphSum, &graph, None).await;
         println!("The graph sum is: {result}");
     }
 
@@ -170,7 +170,7 @@ async fn handle_rpc_receiving_stream(
                 let res = graph
                     .get(&v_id)
                     .unwrap()
-                    .apply_function(&GraphSum, &graph)
+                    .apply_function(&GraphSum, &graph, None)
                     .await;
 
                 // get sending_stream as mut
