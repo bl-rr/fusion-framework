@@ -84,13 +84,15 @@ impl<T: DeserializeOwned + Serialize> Graph<T> {
     }
 
     // Getter
-    pub fn get(&self, v_id: &VertexID) -> Option<&Vertex<T>> {
-        self.vertex_map.get(v_id)
+    pub fn get(&self, v_id: &VertexID) -> &Vertex<T> {
+        self.vertex_map.get(v_id).expect("node not found")
     }
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now
 pub fn build_graph(graph: &mut Graph<isize>, machine_id: MachineID) {
+    // TODO: Check IMPL
+
     match machine_id {
         1 => {
             // Root vertex
@@ -112,6 +114,9 @@ pub fn build_graph(graph: &mut Graph<isize>, machine_id: MachineID) {
             graph.add_new_vertex(9, &[4], &[], None, VertexKind::Remote, Some(2));
         }
         2 => {
+            // Parents of the roots
+            graph.add_new_vertex(4, &[], &[8, 9], None, VertexKind::Remote, Some(1));
+
             // Root vertex
             graph.add_new_vertex(8, &[], &[10, 11], Some(Data(100)), VertexKind::Local, None);
             graph.add_new_vertex(9, &[], &[12, 13], Some(Data(200)), VertexKind::Local, None);

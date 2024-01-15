@@ -9,8 +9,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::vertex::{MachineID, Vertex, VertexID};
 
-/* 
-    The initial RPC Communication 
+/*
+    The initial RPC Communication
 */
 #[derive(Serialize, Deserialize)]
 pub enum RPC {
@@ -27,17 +27,15 @@ pub enum RPC {
 #[derive(Serialize)]
 pub struct RPCRelay<T: Serialize + DeserializeOwned> {
     machine_id: MachineID,
-    rpc_data: RPCData<T>
+    rpc_data: RPCData<T>,
 }
 
 /*
-    Data
-        the vertex/vertices to be sent
- */
+   Data
+       the vertex/vertices to be sent
+*/
 #[derive(Serialize)]
 pub struct RPCData<T: Serialize + DeserializeOwned> {
     id: VertexID,
     data: Vertex<T>,
 }
-
-

@@ -10,6 +10,8 @@
 */
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ops::AddAssign;
 
 use crate::graph::*;
@@ -45,12 +47,145 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
         for sub_graph_root_id in vertex.children().iter() {
             count += graph
                 .get(sub_graph_root_id)
-                .expect("node not found")
-                .apply_function(self, graph, aux_info)
+                .apply_function(self, graph, aux_info.clone())
                 .await;
         }
         count.0
     }
 }
 
-// summing adjacent nodes
+/*
+   Graph Sum in a Fusion Manner
+       1) the nodes at the bounds are accessed by b
+*/
+
+pub struct NaiveMaxAdjacentSum;
+// summing the most recent X nodes
+
+// TODO: Check IMPL
+
+#[derive(Serialize, Deserialize)]
+pub enum Direction {
+    Parent,
+    Children,
+    Start,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NMASInfo {
+    pub direction: Direction,
+    pub distance: usize,
+    pub started: HashSet<VertexID>,
+}
+#[async_trait]
+impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
+    async fn execute(
+        &self,
+        vertex: &Vertex<isize>,
+        graph: &Graph<isize>,
+        aux_info: Option<NMASInfo>,
+    ) -> isize {
+        let mut count = Data(0);
+        count += vertex.get_val().as_ref().unwrap().0;
+
+        let mut aux_info = aux_info.unwrap();
+
+        if aux_info.distance == 0 {
+            return count.0;
+        }
+
+        match aux_info.direction {
+            Direction::Parent => {
+                for parent_id in vertex.parents() {
+                    count += graph
+                        .get(parent_id)
+                        .apply_function(
+                            self,
+                            graph,
+                            Some(NMASInfo {
+                                direction: Direction::Parent,
+                                distance: aux_info.distance - 1,
+                                started: aux_info.started.clone(),
+                            }),
+                        )
+                        .await;
+                }
+            }
+            Direction::Children => {
+                for child_id in vertex.children() {
+                    count += graph
+                        .get(child_id)
+                        .apply_function(
+                            self,
+                            graph,
+                            Some(NMASInfo {
+                                direction: Direction::Children,
+                                distance: aux_info.distance - 1,
+                                started: aux_info.started.clone(),
+                            }),
+                        )
+                        .await;
+                }
+            }
+            Direction::Start => {
+                aux_info.started.insert(vertex.id);
+                for child_id in vertex.children() {
+                    count += graph
+                        .get(child_id)
+                        .apply_function(
+                            self,
+                            graph,
+                            Some(NMASInfo {
+                                direction: Direction::Children,
+                                distance: aux_info.distance - 1,
+                                started: aux_info.started.clone(),
+                            }),
+                        )
+                        .await;
+                }
+                for parent_id in vertex.parents() {
+                    count += graph
+                        .get(parent_id)
+                        .apply_function(
+                            self,
+                            graph,
+                            Some(NMASInfo {
+                                direction: Direction::Parent,
+                                distance: aux_info.distance - 1,
+                                started: aux_info.started.clone(),
+                            }),
+                        )
+                        .await;
+                }
+
+                let res = count.0;
+                let mut vec_of_res = vec![res];
+
+                for connected_nodes_id in vertex.children().iter().chain(vertex.parents().iter()) {
+                    if !aux_info.started.contains(connected_nodes_id) {
+                        vec_of_res.push(
+                            graph
+                                .get(connected_nodes_id)
+                                .apply_function(
+                                    self,
+                                    graph,
+                                    Some(NMASInfo {
+                                        direction: Direction::Start,
+                                        distance: aux_info.distance,
+                                        started: aux_info.started.clone(),
+                                    }),
+                                )
+                                .await,
+                        );
+                    }
+                }
+
+                return vec_of_res.iter().max().unwrap().clone();
+            }
+        }
+
+        count.0
+    }
+}
+
+pub struct MaxBlockSum;

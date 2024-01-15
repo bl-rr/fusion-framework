@@ -5,7 +5,7 @@
    Creation Date: 1/14/2023
 */
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashSet;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -52,7 +52,7 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             T: the output of the UDF, needs to be deserializable for rpc
             F: UDF that defines the execute function
     */
-    pub async fn apply_function<F: UserDefinedFunction<T, U>, U>(
+    pub async fn apply_function<F: UserDefinedFunction<T, U>, U: Serialize + DeserializeOwned>(
         &self,
         udf: &F,
         graph: &Graph<T>,
@@ -64,7 +64,9 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             }
             VertexType::Remote(remote_vertex) => {
                 // Delegate to the remote machine: rpc here
-                remote_vertex.remote_execute(self.id, graph).await
+                remote_vertex
+                    .remote_execute(self.id, graph, auxiliary_information)
+                    .await
             }
         }
     }
@@ -79,6 +81,15 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             VertexType::Remote(_) => {
                 // this should never be reached
                 panic!("Remote Node should not invoke children() function")
+            }
+        }
+    }
+    pub fn parents(&self) -> &HashSet<VertexID> {
+        match &self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.parents(),
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke parents() function")
             }
         }
     }
@@ -184,10 +195,17 @@ impl RemoteVertex {
     /*
        RPC for execute
     */
-    async fn remote_execute<T>(&self, vertex_id: VertexID, graph: &Graph<T>) -> T
+    async fn remote_execute<T, U: Serialize + DeserializeOwned>(
+        &self,
+        vertex_id: VertexID,
+        graph: &Graph<T>,
+        auxiliary_information: U,
+    ) -> T
     where
         T: DeserializeOwned + Serialize,
     {
+        // TODO: Comments + check impl
+
         // The remote machine executes the function and returns the result.
         let rpc_sending_streams = graph.rpc_sending_streams.read().await;
         let mut rpc_sending_stream = rpc_sending_streams
@@ -197,11 +215,18 @@ impl RemoteVertex {
             .await;
 
         let command = bincode::serialize(&rpc::RPC::Execute(vertex_id)).unwrap();
-
         rpc_sending_stream.write_all(&command).await.unwrap();
 
         drop(rpc_sending_stream);
         drop(rpc_sending_streams);
+
+        let sending_streams = graph.sending_streams.read().await;
+        let mut sending_stream = sending_streams.get(&self.location).unwrap().lock().await;
+
+        let aux_info = bincode::serialize(&auxiliary_information).unwrap();
+        let size = aux_info.len().to_ne_bytes().to_vec();
+        let data_to_send = [size, aux_info].concat();
+        sending_stream.write_all(&data_to_send).await.unwrap();
 
         let mut result_bytes = vec![0u8; std::mem::size_of::<T>()];
 

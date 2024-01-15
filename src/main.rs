@@ -7,10 +7,13 @@
 
 use fusion_framework::graph::{build_graph, Graph};
 use fusion_framework::rpc::RPC;
-use fusion_framework::udf::GraphSum;
+use fusion_framework::udf::{Direction, GraphSum, NMASInfo, NaiveMaxAdjacentSum};
 use fusion_framework::vertex::MachineID;
 
-use std::collections::HashMap;
+use fusion_framework::UserDefinedFunction;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -142,24 +145,43 @@ async fn main() {
     for (id, stream) in rpc_receiving_streams.into_iter() {
         let graph = graph.clone();
         tokio::spawn(async move {
-            handle_rpc_receiving_stream(&id, stream, &graph).await;
+            // handle_rpc_receiving_stream(&id, stream, &graph, GraphSum).await;
+            handle_rpc_receiving_stream(&id, stream, &graph, NaiveMaxAdjacentSum).await;
         });
     }
 
     if machine_id == 1 {
         // Apply function and print result
-        let root = graph.get(&0).unwrap();
-        let result = root.apply_function(&GraphSum, &graph, None).await;
-        println!("The graph sum is: {result}");
+        let root = graph.get(&0);
+        let distance = 1;
+        // let result = root.apply_function(&GraphSum, &graph, None).await;
+        let result = root
+            .apply_function(
+                &NaiveMaxAdjacentSum,
+                &graph,
+                Some(NMASInfo {
+                    direction: Direction::Start,
+                    distance,
+                    started: HashSet::new(),
+                }),
+            )
+            .await;
+        // println!("The graph sum is: {result}");
+        println!("The Max Adjacent Sum for {distance} is: {result}");
     }
 
     loop {}
 }
 
-async fn handle_rpc_receiving_stream(
+async fn handle_rpc_receiving_stream<
+    V: Serialize + DeserializeOwned,
+    U: Serialize + DeserializeOwned,
+    T: UserDefinedFunction<V, U>,
+>(
     id: &MachineID,
     mut stream: TcpStream,
-    graph: &Arc<Graph<isize>>,
+    graph: &Arc<Graph<V>>,
+    _type: T,
 ) {
     // receive fixed size of bytes for RPC
     let mut cmd = vec![0u8; std::mem::size_of::<RPC>()];
@@ -167,10 +189,27 @@ async fn handle_rpc_receiving_stream(
     while let Ok(_) = stream.read_exact(&mut cmd).await {
         match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
             RPC::Execute(v_id) => {
+                // TODO: Add Comments
+                let mut size: [u8; 8] = [0u8; std::mem::size_of::<usize>()];
+                let receiving_streams = graph.receiving_streams.read().await;
+                let mut receiving_stream = receiving_streams.get(&id).unwrap().lock().await;
+                receiving_stream.read_exact(&mut size).await.unwrap();
+
+                let size: usize = usize::from_ne_bytes(size);
+                let mut aux_info = vec![0u8; size];
+                println!("aux_info len recv: {}", aux_info.len());
+
+                receiving_stream.read_exact(&mut aux_info).await.unwrap();
+
+                let aux_info =
+                    bincode::deserialize::<U>(&aux_info).expect("Incorrect Auxiliary Info Format");
+
+                drop(receiving_stream);
+                drop(receiving_streams);
+
                 let res = graph
                     .get(&v_id)
-                    .unwrap()
-                    .apply_function(&GraphSum, &graph, None)
+                    .apply_function(&_type, &graph, aux_info)
                     .await;
 
                 // get sending_stream as mut

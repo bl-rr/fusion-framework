@@ -22,6 +22,6 @@ pub mod vertex;
    Trait requirement for user-defined functions
 */
 #[async_trait]
-pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U> {
+pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U: DeserializeOwned + Serialize> {
     async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>, auxiliary_information: U) -> T;
 }
