@@ -59,6 +59,7 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
        1) the nodes at the bounds are accessed by b
 */
 
+#[derive(Clone)]
 pub struct NaiveMaxAdjacentSum;
 // summing the most recent X nodes
 
@@ -73,7 +74,7 @@ pub enum Direction {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NMASInfo {
-    pub direction: Direction,
+    pub source: Option<VertexID>,
     pub distance: usize,
     pub started: HashSet<VertexID>,
 }
@@ -94,63 +95,18 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
             return count.0;
         }
 
-        match aux_info.direction {
-            Direction::Parent => {
-                for parent_id in vertex.parents() {
-                    count += graph
-                        .get(parent_id)
-                        .apply_function(
-                            self,
-                            graph,
-                            Some(NMASInfo {
-                                direction: Direction::Parent,
-                                distance: aux_info.distance - 1,
-                                started: aux_info.started.clone(),
-                            }),
-                        )
-                        .await;
-                }
-            }
-            Direction::Children => {
-                for child_id in vertex.children() {
-                    count += graph
-                        .get(child_id)
-                        .apply_function(
-                            self,
-                            graph,
-                            Some(NMASInfo {
-                                direction: Direction::Children,
-                                distance: aux_info.distance - 1,
-                                started: aux_info.started.clone(),
-                            }),
-                        )
-                        .await;
-                }
-            }
-            Direction::Start => {
+        return match &aux_info.source {
+            None => {
                 aux_info.started.insert(vertex.id);
-                for child_id in vertex.children() {
+
+                for neighbor_id in vertex.edges() {
                     count += graph
-                        .get(child_id)
+                        .get(neighbor_id)
                         .apply_function(
                             self,
                             graph,
                             Some(NMASInfo {
-                                direction: Direction::Children,
-                                distance: aux_info.distance - 1,
-                                started: aux_info.started.clone(),
-                            }),
-                        )
-                        .await;
-                }
-                for parent_id in vertex.parents() {
-                    count += graph
-                        .get(parent_id)
-                        .apply_function(
-                            self,
-                            graph,
-                            Some(NMASInfo {
-                                direction: Direction::Parent,
+                                source: Some(vertex.id),
                                 distance: aux_info.distance - 1,
                                 started: aux_info.started.clone(),
                             }),
@@ -161,7 +117,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                 let res = count.0;
                 let mut vec_of_res = vec![res];
 
-                for connected_nodes_id in vertex.children().iter().chain(vertex.parents().iter()) {
+                for connected_nodes_id in vertex.edges().iter() {
                     if !aux_info.started.contains(connected_nodes_id) {
                         vec_of_res.push(
                             graph
@@ -170,7 +126,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                                     self,
                                     graph,
                                     Some(NMASInfo {
-                                        direction: Direction::Start,
+                                        source: None,
                                         distance: aux_info.distance,
                                         started: aux_info.started.clone(),
                                     }),
@@ -182,9 +138,26 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
 
                 return vec_of_res.iter().max().unwrap().clone();
             }
-        }
-
-        count.0
+            Some(source) => {
+                for neighbor_id in vertex.edges() {
+                    if source.ne(neighbor_id) {
+                        count += graph
+                            .get(neighbor_id)
+                            .apply_function(
+                                self,
+                                graph,
+                                Some(NMASInfo {
+                                    source: Some(vertex.id),
+                                    distance: aux_info.distance - 1,
+                                    started: aux_info.started.clone(),
+                                }),
+                            )
+                            .await;
+                    }
+                }
+                count.0
+            }
+        };
     }
 }
 

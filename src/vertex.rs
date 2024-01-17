@@ -99,6 +99,15 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             }
         }
     }
+    pub fn edges(&self) -> &HashSet<VertexID> {
+        match &self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.edges(),
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke edges() function")
+            }
+        }
+    }
     pub fn get_val(&self) -> &Option<Data<T>> {
         match &self.v_type {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.get_data(),
@@ -214,24 +223,29 @@ impl RemoteVertex {
 
         // The remote machine executes the function and returns the result.
 
-        // Step 1: get all locks so that all messages are sent in order (use the same rpc stream)
-        let rpc_sending_streams = graph.rpc_sending_streams.read().await;
-        let mut rpc_sending_stream = rpc_sending_streams
-            .get(&self.location)
-            .unwrap()
-            .lock()
-            .await;
-
         // Step 2: Construct channels and id
         let (tx, mut rx) = mpsc::channel::<T>(1000);
         let id = Uuid::new_v4();
 
+        println!("waiting on write lock, multiplexing channel");
         // Step 3: Add id to have a sending channel
         graph
             .result_multiplexing_channels
             .write()
             .await
             .insert(id, Mutex::new(tx));
+        println!("got write lock, multiplexing channel");
+
+        // Step 1: get all locks so that all messages are sent in order (use the same rpc stream)
+        println!("waiting on rpc_sending_stream to send");
+        let rpc_sending_streams = graph.rpc_sending_streams.read().await;
+        println!("gotten first lock");
+        let mut rpc_sending_stream = rpc_sending_streams
+            .get(&self.location)
+            .unwrap()
+            .lock()
+            .await;
+        println!("got rpc_sending_stream to send");
 
         // Step 4: Construct the rpc command with aux_info len
         let aux_info = bincode::serialize(&auxiliary_information).unwrap();
@@ -241,18 +255,21 @@ impl RemoteVertex {
         // Step 5: Send the RPC Command and auxiliary information
         println!("rpc sent len: {:?}", command.len());
         println!("rpc sent : {:?}", command);
-        println!("aux_info sent: {:?}\n", aux_info);
+        println!("aux_info sent: {:?}", aux_info);
         rpc_sending_stream
             .write_all(&[command, aux_info].concat())
             .await
             .unwrap();
+        println!("sent successfully\n");
         // rpc_sending_stream.write_all(&aux_info).await.unwrap();
 
-        // drop(rpc_sending_stream);
-        // drop(rpc_sending_streams);
+        drop(rpc_sending_stream);
+        drop(rpc_sending_streams);
 
         // Step 6: wait on the receiver
+        println!("waiting on result");
         let rpc_result = rx.recv().await.unwrap();
+        println!("got result");
         rpc_result
     }
 }

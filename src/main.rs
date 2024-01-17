@@ -141,7 +141,7 @@ async fn main() {
         let graph = graph.clone();
         tokio::spawn(async move {
             // handle_rpc_receiving_stream(&id, stream, &graph, GraphSum).await;
-            handle_rpc_receiving_stream(&id, stream, &graph, NaiveMaxAdjacentSum).await;
+            handle_rpc_receiving_stream(&id, stream, graph, NaiveMaxAdjacentSum).await;
         });
     }
 
@@ -201,7 +201,7 @@ async fn main() {
                 &NaiveMaxAdjacentSum,
                 &graph,
                 Some(NMASInfo {
-                    direction: Direction::Start,
+                    source: None,
                     distance,
                     started: HashSet::new(),
                 }),
@@ -215,13 +215,13 @@ async fn main() {
 }
 
 async fn handle_rpc_receiving_stream<
-    V: Serialize + DeserializeOwned + Debug,
-    U: Serialize + DeserializeOwned + Debug,
-    T: UserDefinedFunction<V, U>,
+    V: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
+    U: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
+    T: UserDefinedFunction<V, U> + Send + Sync + 'static + Clone,
 >(
     id: &MachineID,
     mut stream: TcpStream,
-    graph: &Arc<Graph<V, U>>,
+    graph: Arc<Graph<V, U>>,
     _type: T,
 ) {
     // receive fixed size of bytes for RPC
@@ -248,36 +248,47 @@ async fn handle_rpc_receiving_stream<
                 // drop(receiving_stream);
                 // drop(receiving_streams);
 
-                let res = graph
-                    .get(&v_id)
-                    .apply_function(&_type, &graph, aux_info)
-                    .await;
+                let graph_clone = graph.clone();
+                let _type_clone = _type.clone();
+                let id_clone = id.clone();
 
-                // get sending_stream as mut
-                let sending_streams = graph.sending_streams.read().await;
-                let mut sending_stream = sending_streams.get(&id).unwrap().lock().await;
+                tokio::spawn(async move {
+                    println!("in remote remote");
+                    let res = graph_clone
+                        .get(&v_id)
+                        .apply_function(&_type_clone, &graph_clone, aux_info)
+                        .await;
+                    println!("remote remote done");
 
-                let res_bytes = bincode::serialize::<V>(&res).unwrap();
+                    println!("trying to send back result");
+                    // get sending_stream as mut
+                    let sending_streams = graph_clone.sending_streams.read().await;
+                    let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
+                    println!("gotten lock to send back result");
 
-                let session_control_result = SessionControl {
-                    session_id: uuid,
-                    communication_type: DataType::Result,
-                    data_len: res_bytes.len(),
-                };
+                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
 
-                let session_control_res_bytes =
-                    bincode::serialize(&session_control_result).unwrap();
+                    let session_control_result = SessionControl {
+                        session_id: uuid,
+                        communication_type: DataType::Result,
+                        data_len: res_bytes.len(),
+                    };
 
-                println!(
-                    "session_control_res_bytes sent: {:?}",
-                    session_control_res_bytes
-                );
-                println!("res_bytes sent: {:?}\n", res_bytes);
+                    let session_control_res_bytes =
+                        bincode::serialize(&session_control_result).unwrap();
 
-                sending_stream
-                    .write_all(&[session_control_res_bytes, res_bytes].concat())
-                    .await
-                    .unwrap();
+                    println!(
+                        "session_control_res_bytes sent: {:?}",
+                        session_control_res_bytes
+                    );
+                    println!("res_bytes sent: {:?}\n", res_bytes);
+
+                    sending_stream
+                        .write_all(&[session_control_res_bytes, res_bytes].concat())
+                        .await
+                        .unwrap();
+                    println!("sent back result successfully");
+                });
             }
             RPC::Relay(_, _, _) => {
                 unimplemented!()
