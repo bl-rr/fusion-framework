@@ -32,6 +32,7 @@ impl AddAssign<isize> for Data<isize> {
 }
 
 // UDF Struct
+#[derive(Clone)]
 pub struct GraphSum;
 #[async_trait]
 impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
@@ -76,7 +77,7 @@ pub enum Direction {
 pub struct NMASInfo {
     pub source: Option<VertexID>,
     pub distance: usize,
-    pub started: HashSet<VertexID>,
+    pub started: Option<HashSet<VertexID>>,
 }
 #[async_trait]
 impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
@@ -97,7 +98,8 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
 
         return match &aux_info.source {
             None => {
-                aux_info.started.insert(vertex.id);
+                let mut aux_info_started = aux_info.started.unwrap();
+                aux_info_started.insert(vertex.id);
 
                 for neighbor_id in vertex.edges() {
                     count += graph
@@ -108,7 +110,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                             Some(NMASInfo {
                                 source: Some(vertex.id),
                                 distance: aux_info.distance - 1,
-                                started: aux_info.started.clone(),
+                                started: None,
                             }),
                         )
                         .await;
@@ -118,7 +120,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                 let mut vec_of_res = vec![res];
 
                 for connected_nodes_id in vertex.edges().iter() {
-                    if !aux_info.started.contains(connected_nodes_id) {
+                    if !aux_info_started.contains(connected_nodes_id) {
                         vec_of_res.push(
                             graph
                                 .get(connected_nodes_id)
@@ -128,7 +130,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                                     Some(NMASInfo {
                                         source: None,
                                         distance: aux_info.distance,
-                                        started: aux_info.started.clone(),
+                                        started: Some(aux_info_started.clone()),
                                     }),
                                 )
                                 .await,
@@ -149,7 +151,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                                 Some(NMASInfo {
                                     source: Some(vertex.id),
                                     distance: aux_info.distance - 1,
-                                    started: aux_info.started.clone(),
+                                    started: None,
                                 }),
                             )
                             .await;

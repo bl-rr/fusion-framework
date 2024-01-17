@@ -140,7 +140,7 @@ async fn main() {
     for (id, stream) in rpc_receiving_streams.into_iter() {
         let graph = graph.clone();
         tokio::spawn(async move {
-            // handle_rpc_receiving_stream(&id, stream, &graph, GraphSum).await;
+            // handle_rpc_receiving_stream(&id, stream, graph, GraphSum).await;
             handle_rpc_receiving_stream(&id, stream, graph, NaiveMaxAdjacentSum).await;
         });
     }
@@ -203,10 +203,11 @@ async fn main() {
                 Some(NMASInfo {
                     source: None,
                     distance,
-                    started: HashSet::new(),
+                    started: Some(HashSet::new()),
                 }),
             )
             .await;
+        // let result = root.apply_function(&GraphSum, &graph, None).await;
         // println!("The graph sum is: {result}");
         println!("The Max Adjacent Sum for {distance} is: {result}");
     }
