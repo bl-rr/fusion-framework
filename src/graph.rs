@@ -16,16 +16,17 @@ use crate::vertex::*;
 
 /*
     Graph Struct that stores the (vertex_id -> vertex) mapping, acting as pointers to vertices
+
+    TODO: Add weights to edges
 */
-pub struct Graph<T: DeserializeOwned + Serialize, U> {
+pub struct Graph<T: DeserializeOwned + Serialize> {
     pub vertex_map: HashMap<VertexID, Vertex<T>>,
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<T>>>>,
-    pub aux_info_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<U>>>>,
 }
 
-impl<T: DeserializeOwned + Serialize, U> Graph<T, U> {
+impl<T: DeserializeOwned + Serialize> Graph<T> {
     /*
        Constructor
     */
@@ -35,7 +36,6 @@ impl<T: DeserializeOwned + Serialize, U> Graph<T, U> {
             sending_streams: RwLock::new(HashMap::new()),
             rpc_sending_streams: RwLock::new(HashMap::new()),
             result_multiplexing_channels: RwLock::new(HashMap::new()),
-            aux_info_multiplexing_channels: RwLock::new(HashMap::new()),
         }
     }
 
@@ -54,9 +54,9 @@ impl<T: DeserializeOwned + Serialize, U> Graph<T, U> {
         id: VertexID,
         incoming: &[VertexID],
         outgoing: &[VertexID],
-        data: Option<Data<T>>,
-        vertex_kind: VertexKind,
-        location: Option<MachineID>,
+        data: Option<Data<T>>,       // only exists for local nodes
+        vertex_kind: VertexKind,     // determining the type of node (remote | local)
+        location: Option<MachineID>, // only exists for remote nodes
     ) {
         let vertex = match vertex_kind {
             VertexKind::Local => Vertex {
@@ -87,15 +87,36 @@ impl<T: DeserializeOwned + Serialize, U> Graph<T, U> {
         self.add_vertex(id, vertex);
     }
 
-    // Getter
+    // Getter, assumes no error
     pub fn get(&self, v_id: &VertexID) -> &Vertex<T> {
         self.vertex_map.get(v_id).expect("node not found")
     }
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now
-pub fn build_graph_integer_data<U>(graph: &mut Graph<isize, U>, machine_id: MachineID) {
-    // TODO: Check IMPL
+pub fn build_graph_integer_data(graph: &mut Graph<isize>, machine_id: MachineID) {
+    // Note: this is specific testing function
+
+    //             Node 1:
+    //                  0
+    //                 / \
+    //                /   \
+    //               /     \
+    //              1       2
+    //             / \     / \
+    //            3   4   5   6
+    //               /|\
+    //              / | \
+    //             7  8  9
+    //              (R2) (R2)
+    //
+    //             Node 2:
+    //                  4 (R1)
+    //                 / \
+    //                /   \
+    //               8     9
+    //              / \   / \
+    //             10 11 12 13
 
     match machine_id {
         1 => {
@@ -118,7 +139,7 @@ pub fn build_graph_integer_data<U>(graph: &mut Graph<isize, U>, machine_id: Mach
             graph.add_new_vertex(9, &[4], &[], None, VertexKind::Remote, Some(2));
         }
         2 => {
-            // Parents of the roots
+            // Parent of the roots
             graph.add_new_vertex(4, &[], &[8, 9], None, VertexKind::Remote, Some(1));
 
             // Root vertex

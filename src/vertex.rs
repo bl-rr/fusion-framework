@@ -5,10 +5,9 @@
    Creation Date: 1/14/2023
 */
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashSet;
-use std::fmt::Debug;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
@@ -55,13 +54,10 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             T: the output of the UDF, needs to be deserializable for rpc
             F: UDF that defines the execute function
     */
-    pub async fn apply_function<
-        F: UserDefinedFunction<T, U>,
-        U: Serialize + DeserializeOwned + Debug,
-    >(
+    pub async fn apply_function<F: UserDefinedFunction<T, U>, U: Serialize + DeserializeOwned>(
         &self,
         udf: &F,
-        graph: &Graph<T, U>,
+        graph: &Graph<T>,
         auxiliary_information: U,
     ) -> T {
         match &self.v_type {
@@ -79,7 +75,7 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
 
     /* Vertex Interfaces
        To allow local_vertex type functions to be called by the outer vertex struct
-       Note: this is doable because the functions should never be invoked by a remote_vertex, or there are bugs
+       Note: these are doable because the functions should never be invoked by a remote_vertex, or there are bugs
     */
     pub fn children(&self) -> &HashSet<VertexID> {
         match &self.v_type {
@@ -153,6 +149,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
 
     /*
        Builder/Creator method for easier construction in graph constructors
+       or in general when creating individual vertices
     */
     pub fn create_vertex(incoming: &[VertexID], outgoing: &[VertexID], data: Data<T>) -> Self {
         LocalVertex::new(
@@ -213,63 +210,51 @@ impl RemoteVertex {
     async fn remote_execute<T, U: Serialize + DeserializeOwned>(
         &self,
         vertex_id: VertexID,
-        graph: &Graph<T, U>,
+        graph: &Graph<T>,
         auxiliary_information: U,
     ) -> T
     where
         T: DeserializeOwned + Serialize,
     {
-        // TODO: Comments + check impl
-
         // The remote machine executes the function and returns the result.
 
-        // Step 2: Construct channels and id
+        // Step 1: Construct channels and id
         let (tx, mut rx) = mpsc::channel::<T>(1000);
         let id = Uuid::new_v4();
 
-        println!("waiting on write lock, multiplexing channel");
-        // Step 3: Add id to have a sending channel
+        // Step 2: Add id to the graph, to have a (id -> sending channel) mapping
         graph
             .result_multiplexing_channels
             .write()
             .await
             .insert(id, Mutex::new(tx));
-        println!("got write lock, multiplexing channel");
 
-        // Step 1: get all locks so that all messages are sent in order (use the same rpc stream)
-        println!("waiting on rpc_sending_stream to send");
+        // Step 3: get lock on the sending stream so that all messages are sent in order, as expected
+        //      (using the same rpc stream, send command and the data if necessary)
         let rpc_sending_streams = graph.rpc_sending_streams.read().await;
-        println!("gotten first lock");
         let mut rpc_sending_stream = rpc_sending_streams
             .get(&self.location)
             .unwrap()
             .lock()
             .await;
-        println!("got rpc_sending_stream to send");
 
-        // Step 4: Construct the rpc command with aux_info len
+        // Step 4: Construct the aux_info byte array, the rpc command with aux_info len
         let aux_info = bincode::serialize(&auxiliary_information).unwrap();
         let aux_info_len = aux_info.len();
         let command = bincode::serialize(&rpc::RPC::Execute(id, vertex_id, aux_info_len)).unwrap();
 
         // Step 5: Send the RPC Command and auxiliary information
-        println!("rpc sent len: {:?}", command.len());
-        println!("rpc sent : {:?}", command);
-        println!("aux_info sent: {:?}", aux_info);
         rpc_sending_stream
             .write_all(&[command, aux_info].concat())
             .await
             .unwrap();
-        println!("sent successfully\n");
-        // rpc_sending_stream.write_all(&aux_info).await.unwrap();
 
+        // Step 6: Drop the sender before waiting/blocking/yielding
         drop(rpc_sending_stream);
         drop(rpc_sending_streams);
 
-        // Step 6: wait on the receiver
-        println!("waiting on result");
+        // Step 7: Wait on the receiver and return result
         let rpc_result = rx.recv().await.unwrap();
-        println!("got result");
         rpc_result
     }
 }

@@ -15,6 +15,8 @@ use crate::vertex::{MachineID, Vertex, VertexID};
 */
 #[derive(Serialize, Deserialize)]
 pub enum RPC {
+    // the number of fields may keep on growing as we need to pass more information to accommodate
+    // for other types of execution
     Execute(Uuid, VertexID, usize), // usize for trailing data size
     Relay(Uuid, VertexID, usize),
     RequestData(Uuid, VertexID, usize),
@@ -43,14 +45,14 @@ pub struct RPCData<T: Serialize + DeserializeOwned> {
 
 // communication/session control
 #[derive(Serialize, Deserialize)]
-pub struct SessionControl {
+pub struct SessionHeader {
     pub session_id: Uuid,
-    pub communication_type: DataType,
+    pub session_type: DataType,
     pub data_len: usize,
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum DataType {
-    AuxInfo,
     Result,
+    NotYetNeeded, // Note: for later use
 }

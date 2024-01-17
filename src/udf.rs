@@ -20,8 +20,6 @@ use crate::UserDefinedFunction;
 
 /* *********** Starting of User's Playground *********** */
 
-// Summing the entire graph
-
 /*
    Data<isize> operations
 */
@@ -31,7 +29,11 @@ impl AddAssign<isize> for Data<isize> {
     }
 }
 
-// UDF Struct
+// UDF Structs
+
+/*
+   GraphSum sums the entire graph recursively
+*/
 #[derive(Clone)]
 pub struct GraphSum;
 #[async_trait]
@@ -39,7 +41,7 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        graph: &Graph<isize, Option<u64>>,
+        graph: &Graph<isize>,
         aux_info: Option<u64>,
     ) -> isize {
         let mut count = Data(0);
@@ -56,51 +58,47 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
 }
 
 /*
-   Graph Sum in a Fusion Manner
-       1) the nodes at the bounds are accessed by b
+   NaiveMaxAdjacentSum sums the most recent X nodes' data in a naive manner,
+   restarting at each node at taking the max of all possible node starts
 */
-
 #[derive(Clone)]
 pub struct NaiveMaxAdjacentSum;
-// summing the most recent X nodes
 
-// TODO: Check IMPL
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum Direction {
-    Parent,
-    Children,
-    Start,
-}
-
+/*
+   User defined auxiliary information to be passed around for each function call
+*/
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NMASInfo {
-    pub source: Option<VertexID>,
-    pub distance: usize,
-    pub started: Option<HashSet<VertexID>>,
+    pub source: Option<VertexID>, // if at the start then None, else encapsulates the start of the current exploration
+    pub distance: usize,          // the steps the current node can use
+    pub started: Option<HashSet<VertexID>>, // node that have been used as the start
 }
+
 #[async_trait]
 impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        graph: &Graph<isize, Option<NMASInfo>>,
+        graph: &Graph<isize>,
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);
         count += vertex.get_val().as_ref().unwrap().0;
 
-        let mut aux_info = aux_info.unwrap();
+        let aux_info = aux_info.unwrap();
 
+        // exhausted all steps
         if aux_info.distance == 0 {
             return count.0;
         }
 
         return match &aux_info.source {
             None => {
+                // this is start, add to the "started" set
                 let mut aux_info_started = aux_info.started.unwrap();
                 aux_info_started.insert(vertex.id);
 
+                // travel to neighbors with distance - 1, "started" no longer needed
                 for neighbor_id in vertex.edges() {
                     count += graph
                         .get(neighbor_id)
@@ -116,9 +114,11 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                         .await;
                 }
 
+                // gather all possible exploration results and taking the max
                 let res = count.0;
                 let mut vec_of_res = vec![res];
 
+                // start all adjacent, non-"started" nodes
                 for connected_nodes_id in vertex.edges().iter() {
                     if !aux_info_started.contains(connected_nodes_id) {
                         vec_of_res.push(
@@ -138,9 +138,11 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                     }
                 }
 
-                return vec_of_res.iter().max().unwrap().clone();
+                // return the max of all explorations
+                vec_of_res.iter().max().unwrap().clone()
             }
             Some(source) => {
+                // This is not the start, travel to neighbors with distance - 1, "started" not needed
                 for neighbor_id in vertex.edges() {
                     if source.ne(neighbor_id) {
                         count += graph
@@ -157,10 +159,35 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                             .await;
                     }
                 }
+                // return sum
                 count.0
             }
         };
     }
 }
 
+// the following are still rough ideas
+
+/*
+   Graph Sum in a Fusion Manner
+       1) the nodes at the bounds are accessed by both nodes
+       2) When fused, the boundaries are taken care of
+
+   This is for passing node data and "borrowing", where both nodes' data are needed
+*/
+pub struct GraphSumFusion;
+
+/*
+   Assuming that we have divided the graph into useful blocks, return the max-sum
+
+   Also for borrowing
+*/
 pub struct MaxBlockSum;
+
+/*
+   Other brainstorms:
+       1) update the node where the max exploration NaiveMaxAdjacentSum started from with the result
+       2) update all nodes with plus 1
+       3) swap largest and smallest nodes
+       ...
+*/

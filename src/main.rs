@@ -6,15 +6,14 @@
 */
 
 use fusion_framework::graph::{build_graph_integer_data, Graph};
-use fusion_framework::rpc::{DataType, SessionControl, RPC};
-use fusion_framework::udf::{Direction, GraphSum, NMASInfo, NaiveMaxAdjacentSum};
+use fusion_framework::rpc::{DataType, SessionHeader, RPC};
+use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum};
 use fusion_framework::vertex::MachineID;
 
 use fusion_framework::UserDefinedFunction;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -41,7 +40,7 @@ async fn main() {
 
     // streams for handling initial communication
     let mut rpc_receiving_streams = HashMap::new();
-    let mut data_receiving_streams = HashMap::new();
+    let mut data_receiving_streams = vec![];
 
     // Start listening on the local port
     let listener = TcpListener::bind(&local_address)
@@ -55,7 +54,7 @@ async fn main() {
     match machine_id {
         // the order of communication is crucial for initial setup
         1 => {
-            // 1 listens first, and needs to be launched first
+            // (1) listens first, and needs to be launched first
             let (incoming_stream, socket_addr) = listener
                 .accept()
                 .await
@@ -78,7 +77,7 @@ async fn main() {
 
             // fill in the data structures
             rpc_receiving_streams.insert(2, rpc_receiving_stream);
-            data_receiving_streams.insert(2, incoming_stream);
+            data_receiving_streams.push(incoming_stream);
             graph
                 .sending_streams
                 .write()
@@ -91,7 +90,7 @@ async fn main() {
                 .insert(2, Mutex::new(rpc_sending_stream));
         }
         2 => {
-            // 2 initiates outgoing connections first, needs to be launched second
+            // (2) initiates outgoing connections first, needs to be launched second
             let outgoing_stream = TcpStream::connect(&remote_address)
                 .await
                 .expect(&*format!("Failed to connect to {remote_address}"));
@@ -105,7 +104,6 @@ async fn main() {
                 .accept()
                 .await
                 .expect("Failed to accept connection");
-
             println!("New connection from {socket_addr}");
 
             let (rpc_receiving_stream, socket_addr) = listener
@@ -116,7 +114,7 @@ async fn main() {
 
             // fill in the data structures
             rpc_receiving_streams.insert(1, rpc_receiving_stream);
-            data_receiving_streams.insert(1, incoming_stream);
+            data_receiving_streams.push(incoming_stream);
             graph
                 .sending_streams
                 .write()
@@ -135,62 +133,43 @@ async fn main() {
 
     // use graph builder to build the graph based on machine_id
     build_graph_integer_data(&mut graph, machine_id);
+    println!("Graph built for testing");
 
+    // constructing graph for multi-thread sharing
     let graph = Arc::new(graph);
+
+    // getting fixed size for reception
+    let dummy_rpc = RPC::Execute(Uuid::default(), 0, 0);
+    let dummy_rpc_len = bincode::serialize(&dummy_rpc).unwrap().len();
+    // handle rpc receiving streams
     for (id, stream) in rpc_receiving_streams.into_iter() {
         let graph = graph.clone();
         tokio::spawn(async move {
             // handle_rpc_receiving_stream(&id, stream, graph, GraphSum).await;
-            handle_rpc_receiving_stream(&id, stream, graph, NaiveMaxAdjacentSum).await;
+            handle_rpc_receiving_stream(&id, stream, graph, NaiveMaxAdjacentSum, dummy_rpc_len)
+                .await;
         });
     }
 
-    for (_, mut data_receiving_stream) in data_receiving_streams.into_iter() {
+    // getting fixed size for reception
+    let dummy_session_control_data_len = bincode::serialize(&SessionHeader {
+        session_id: Uuid::default(),
+        session_type: DataType::Result,
+        data_len: 0,
+    })
+    .unwrap()
+    .len();
+    // handle data receiving streams
+    for data_receiving_stream in data_receiving_streams.into_iter() {
         let graph = graph.clone();
-        let dummy_session_control_data_len = bincode::serialize(&SessionControl {
-            session_id: Uuid::default(),
-            communication_type: DataType::Result,
-            data_len: 0,
-        })
-        .unwrap()
-        .len();
-
-        tokio::spawn(async move {
-            let mut session_control_bytes = vec![0u8; dummy_session_control_data_len];
-            while let Ok(_) = data_receiving_stream
-                .read_exact(&mut session_control_bytes)
-                .await
-            {
-                println!("session_control data received: {:?}", session_control_bytes);
-                let session_control =
-                    bincode::deserialize::<SessionControl>(&session_control_bytes).unwrap();
-                match &session_control.communication_type {
-                    DataType::AuxInfo => {
-                        unimplemented!()
-                    }
-                    DataType::Result => {
-                        let res_channels = graph.result_multiplexing_channels.read().await;
-                        let res_channel = res_channels
-                            .get(&session_control.session_id)
-                            .expect("session id not exist in aux_info channel")
-                            .lock()
-                            .await;
-
-                        let mut res_bytes = vec![0u8; session_control.data_len];
-                        data_receiving_stream
-                            .read_exact(&mut res_bytes)
-                            .await
-                            .unwrap();
-                        println!("res_bytes received: {:?}\n", res_bytes);
-
-                        let res = bincode::deserialize::<isize>(&res_bytes).unwrap(); // Note: Make this generic soon
-                        res_channel.send(res).await.unwrap();
-                    }
-                }
-            }
-        });
+        tokio::spawn(handle_data_receiving_stream(
+            data_receiving_stream,
+            graph,
+            dummy_session_control_data_len,
+        ));
     }
 
+    // Note: For testing, invoke functions on machine 1
     if machine_id == 1 {
         // Apply function and print result
         let root = graph.get(&0);
@@ -212,83 +191,112 @@ async fn main() {
         println!("The Max Adjacent Sum for {distance} is: {result}");
     }
 
+    // keeping the machine running
     loop {}
 }
 
+async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
+    mut data_receiving_stream: TcpStream,
+    graph: Arc<Graph<T>>,
+    dummy_session_control_data_len: usize,
+) {
+    // construct the reception buffer for session_header
+    let mut session_header_bytes = vec![0u8; dummy_session_control_data_len];
+
+    // each time, start with receiving the header
+    while let Ok(_) = data_receiving_stream
+        .read_exact(&mut session_header_bytes)
+        .await
+    {
+        let session_header = bincode::deserialize::<SessionHeader>(&session_header_bytes).unwrap();
+
+        // depending the type, do different things
+        match &session_header.session_type {
+            DataType::NotYetNeeded => {
+                unimplemented!()
+            }
+            DataType::Result => {
+                // get where the channel the result should go to
+                let res_channels = graph.result_multiplexing_channels.read().await;
+                let res_channel = res_channels
+                    .get(&session_header.session_id)
+                    .expect("session id not exist in aux_info channel")
+                    .lock()
+                    .await;
+
+                // construct the data buffer and receive them
+                let mut res_bytes = vec![0u8; session_header.data_len];
+                data_receiving_stream
+                    .read_exact(&mut res_bytes)
+                    .await
+                    .unwrap();
+
+                // send over the result
+                let res = bincode::deserialize::<T>(&res_bytes).unwrap();
+                res_channel.send(res).await.unwrap();
+            }
+        }
+    }
+}
+
 async fn handle_rpc_receiving_stream<
-    V: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
-    U: Serialize + DeserializeOwned + Debug + Send + Sync + 'static,
-    T: UserDefinedFunction<V, U> + Send + Sync + 'static + Clone,
+    T: Serialize + DeserializeOwned + Send + Sync + 'static,
+    U: Serialize + DeserializeOwned + Send + Sync + 'static,
+    V: UserDefinedFunction<T, U> + Send + Sync + 'static + Clone,
 >(
     id: &MachineID,
     mut stream: TcpStream,
-    graph: Arc<Graph<V, U>>,
-    _type: T,
+    graph: Arc<Graph<T>>,
+    _type: V,
+    dummy_rpc_len: usize,
 ) {
-    // receive fixed size of bytes for RPC
-
-    let dummy_rpc = RPC::Execute(Uuid::default(), 0, 0);
-    let dummy_rpc_len = bincode::serialize(&dummy_rpc).unwrap().len();
-
+    // construct the buffer to receive fixed size of bytes for RPC
     let mut cmd = vec![0u8; dummy_rpc_len];
-    println!("length of rpc: {:?}", dummy_rpc_len);
 
     while let Ok(_) = stream.read_exact(&mut cmd).await {
-        println!("rpc received: {:?}", cmd);
         match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
             RPC::Execute(uuid, v_id, aux_info_len) => {
-                // TODO: Add Comments
-
+                // construct the buffer for auxiliary information and receive it
                 let mut aux_info = vec![0u8; aux_info_len];
                 stream.read_exact(&mut aux_info).await.unwrap();
-                println!("aux_info_bytes received: {:?}\n", aux_info);
+                // it comes in the same RPC stream as noted in remote_execute()
 
                 let aux_info =
                     bincode::deserialize::<U>(&aux_info).expect("Incorrect Auxiliary Info Format");
 
-                // drop(receiving_stream);
-                // drop(receiving_streams);
-
+                // construct variable to pass into the new thread, for non-blocking circular/recursive remote calls
                 let graph_clone = graph.clone();
                 let _type_clone = _type.clone();
                 let id_clone = id.clone();
 
                 tokio::spawn(async move {
-                    println!("in remote remote");
+                    // calculate the result non-blocking-ly, without holding onto locks prior to entrance
                     let res = graph_clone
                         .get(&v_id)
                         .apply_function(&_type_clone, &graph_clone, aux_info)
                         .await;
-                    println!("remote remote done");
 
-                    println!("trying to send back result");
                     // get sending_stream as mut
                     let sending_streams = graph_clone.sending_streams.read().await;
                     let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
-                    println!("gotten lock to send back result");
 
-                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
+                    let res_bytes = bincode::serialize::<T>(&res).unwrap();
 
-                    let session_control_result = SessionControl {
+                    // construct session header
+                    let session_header_for_result = SessionHeader {
                         session_id: uuid,
-                        communication_type: DataType::Result,
+                        session_type: DataType::Result,
                         data_len: res_bytes.len(),
                     };
 
-                    let session_control_res_bytes =
-                        bincode::serialize(&session_control_result).unwrap();
+                    let session_header_for_result_bytes =
+                        bincode::serialize(&session_header_for_result).unwrap();
 
-                    println!(
-                        "session_control_res_bytes sent: {:?}",
-                        session_control_res_bytes
-                    );
-                    println!("res_bytes sent: {:?}\n", res_bytes);
-
+                    // send all the data
                     sending_stream
-                        .write_all(&[session_control_res_bytes, res_bytes].concat())
+                        .write_all(&[session_header_for_result_bytes, res_bytes].concat())
                         .await
                         .unwrap();
-                    println!("sent back result successfully");
                 });
             }
             RPC::Relay(_, _, _) => {

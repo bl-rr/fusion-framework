@@ -9,7 +9,6 @@
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fmt::Debug;
 
 use crate::graph::Graph;
 use crate::vertex::Vertex;
@@ -23,11 +22,6 @@ pub mod vertex;
    Trait requirement for user-defined functions
 */
 #[async_trait]
-pub trait UserDefinedFunction<
-    T: DeserializeOwned + Serialize,
-    U: DeserializeOwned + Serialize + Debug,
->
-{
-    async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T, U>, auxiliary_information: U)
-        -> T;
+pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U: DeserializeOwned + Serialize> {
+    async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>, auxiliary_information: U) -> T;
 }
