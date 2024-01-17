@@ -1,4 +1,4 @@
-/* graph.rs
+/* worker
    Contains all the graph related structs and functions, an layer on top of the vertices
 
    Author: Binghong(Leo) Li
@@ -15,24 +15,25 @@ use uuid::Uuid;
 use crate::vertex::*;
 
 /*
-    Graph Struct that stores the (vertex_id -> vertex) mapping, acting as pointers to vertices
+    Worker Struct that stores the (vertex_id -> vertex) mapping, acting as pointers to vertices
+        as well as the communication channels
 
     TODO: Add weights to edges
 */
-pub struct Graph<T: DeserializeOwned + Serialize> {
-    pub vertex_map: HashMap<VertexID, Vertex<T>>,
+pub struct Worker<T: DeserializeOwned + Serialize> {
+    pub graph: HashMap<VertexID, Vertex<T>>, // vertex_id -> vertex mapping
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<T>>>>,
 }
 
-impl<T: DeserializeOwned + Serialize> Graph<T> {
+impl<T: DeserializeOwned + Serialize> Worker<T> {
     /*
        Constructor
     */
     pub fn new() -> Self {
-        Graph {
-            vertex_map: HashMap::new(),
+        Worker {
+            graph: HashMap::new(),
             sending_streams: RwLock::new(HashMap::new()),
             rpc_sending_streams: RwLock::new(HashMap::new()),
             result_multiplexing_channels: RwLock::new(HashMap::new()),
@@ -43,7 +44,7 @@ impl<T: DeserializeOwned + Serialize> Graph<T> {
        Adding an existing Vertex
     */
     pub fn add_vertex(&mut self, v_id: VertexID, vertex: Vertex<T>) {
-        self.vertex_map.insert(v_id, vertex);
+        self.graph.insert(v_id, vertex);
     }
 
     /*
@@ -88,13 +89,13 @@ impl<T: DeserializeOwned + Serialize> Graph<T> {
     }
 
     // Getter, assumes no error
-    pub fn get(&self, v_id: &VertexID) -> &Vertex<T> {
-        self.vertex_map.get(v_id).expect("node not found")
+    pub fn get_vertex_by_id(&self, v_id: &VertexID) -> &Vertex<T> {
+        self.graph.get(v_id).expect("node not found")
     }
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now
-pub fn build_graph_integer_data(graph: &mut Graph<isize>, machine_id: MachineID) {
+pub fn build_graph_integer_data(worker: &mut Worker<isize>, machine_id: MachineID) {
     // Note: this is specific testing function
 
     //             Node 1:
@@ -121,36 +122,36 @@ pub fn build_graph_integer_data(graph: &mut Graph<isize>, machine_id: MachineID)
     match machine_id {
         1 => {
             // Root vertex
-            graph.add_new_vertex(0, &[], &[1, 2], Some(Data(1)), VertexKind::Local, None);
+            worker.add_new_vertex(0, &[], &[1, 2], Some(Data(1)), VertexKind::Local, None);
 
             // First level children
-            graph.add_new_vertex(1, &[0], &[3, 4], Some(Data(2)), VertexKind::Local, None);
-            graph.add_new_vertex(2, &[0], &[5, 6], Some(Data(3)), VertexKind::Local, None);
+            worker.add_new_vertex(1, &[0], &[3, 4], Some(Data(2)), VertexKind::Local, None);
+            worker.add_new_vertex(2, &[0], &[5, 6], Some(Data(3)), VertexKind::Local, None);
 
             // Second level children
-            graph.add_new_vertex(3, &[1], &[], Some(Data(4)), VertexKind::Local, None);
-            graph.add_new_vertex(4, &[1], &[7, 8, 9], Some(Data(5)), VertexKind::Local, None);
-            graph.add_new_vertex(5, &[2], &[], Some(Data(6)), VertexKind::Local, None);
-            graph.add_new_vertex(6, &[2], &[], Some(Data(7)), VertexKind::Local, None);
+            worker.add_new_vertex(3, &[1], &[], Some(Data(4)), VertexKind::Local, None);
+            worker.add_new_vertex(4, &[1], &[7, 8, 9], Some(Data(5)), VertexKind::Local, None);
+            worker.add_new_vertex(5, &[2], &[], Some(Data(6)), VertexKind::Local, None);
+            worker.add_new_vertex(6, &[2], &[], Some(Data(7)), VertexKind::Local, None);
 
             // Third level child
-            graph.add_new_vertex(7, &[4], &[], Some(Data(8)), VertexKind::Local, None);
-            graph.add_new_vertex(8, &[4], &[], None, VertexKind::Remote, Some(2));
-            graph.add_new_vertex(9, &[4], &[], None, VertexKind::Remote, Some(2));
+            worker.add_new_vertex(7, &[4], &[], Some(Data(8)), VertexKind::Local, None);
+            worker.add_new_vertex(8, &[4], &[], None, VertexKind::Remote, Some(2));
+            worker.add_new_vertex(9, &[4], &[], None, VertexKind::Remote, Some(2));
         }
         2 => {
             // Parent of the roots
-            graph.add_new_vertex(4, &[], &[8, 9], None, VertexKind::Remote, Some(1));
+            worker.add_new_vertex(4, &[], &[8, 9], None, VertexKind::Remote, Some(1));
 
             // Root vertex
-            graph.add_new_vertex(8, &[4], &[10, 11], Some(Data(100)), VertexKind::Local, None);
-            graph.add_new_vertex(9, &[4], &[12, 13], Some(Data(200)), VertexKind::Local, None);
+            worker.add_new_vertex(8, &[4], &[10, 11], Some(Data(100)), VertexKind::Local, None);
+            worker.add_new_vertex(9, &[4], &[12, 13], Some(Data(200)), VertexKind::Local, None);
 
             // First level children
-            graph.add_new_vertex(10, &[8], &[], Some(Data(300)), VertexKind::Local, None);
-            graph.add_new_vertex(11, &[8], &[], Some(Data(400)), VertexKind::Local, None);
-            graph.add_new_vertex(12, &[9], &[], Some(Data(500)), VertexKind::Local, None);
-            graph.add_new_vertex(13, &[9], &[], Some(Data(600)), VertexKind::Local, None);
+            worker.add_new_vertex(10, &[8], &[], Some(Data(300)), VertexKind::Local, None);
+            worker.add_new_vertex(11, &[8], &[], Some(Data(400)), VertexKind::Local, None);
+            worker.add_new_vertex(12, &[9], &[], Some(Data(500)), VertexKind::Local, None);
+            worker.add_new_vertex(13, &[9], &[], Some(Data(600)), VertexKind::Local, None);
         }
         _ => {
             unimplemented!()

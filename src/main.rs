@@ -5,10 +5,10 @@
    Creation Date: 1/14/2023
 */
 
-use fusion_framework::graph::{build_graph_integer_data, Graph};
 use fusion_framework::rpc::{DataType, SessionHeader, RPC};
 use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum};
 use fusion_framework::vertex::MachineID;
+use fusion_framework::worker::{build_graph_integer_data, Worker};
 
 use fusion_framework::UserDefinedFunction;
 use serde::de::DeserializeOwned;
@@ -48,8 +48,8 @@ async fn main() {
         .expect("Failed to bind local address");
     println!("Listening on {}", local_address);
 
-    // Create new graph instance
-    let mut graph = Graph::new();
+    // Create new worker instance
+    let mut worker = Worker::new();
 
     match machine_id {
         // the order of communication is crucial for initial setup
@@ -78,12 +78,12 @@ async fn main() {
             // fill in the data structures
             rpc_receiving_streams.insert(2, rpc_receiving_stream);
             data_receiving_streams.push(incoming_stream);
-            graph
+            worker
                 .sending_streams
                 .write()
                 .await
                 .insert(2, Mutex::new(outgoing_stream));
-            graph
+            worker
                 .rpc_sending_streams
                 .write()
                 .await
@@ -115,12 +115,12 @@ async fn main() {
             // fill in the data structures
             rpc_receiving_streams.insert(1, rpc_receiving_stream);
             data_receiving_streams.push(incoming_stream);
-            graph
+            worker
                 .sending_streams
                 .write()
                 .await
                 .insert(1, Mutex::new(outgoing_stream));
-            graph
+            worker
                 .rpc_sending_streams
                 .write()
                 .await
@@ -132,21 +132,21 @@ async fn main() {
     println!("Simulation Set Up Complete: Communication channels");
 
     // use graph builder to build the graph based on machine_id
-    build_graph_integer_data(&mut graph, machine_id);
+    build_graph_integer_data(&mut worker, machine_id);
     println!("Graph built for testing");
 
     // constructing graph for multi-thread sharing
-    let graph = Arc::new(graph);
+    let worker = Arc::new(worker);
 
     // getting fixed size for reception
     let dummy_rpc = RPC::Execute(Uuid::default(), 0, 0);
     let dummy_rpc_len = bincode::serialize(&dummy_rpc).unwrap().len();
     // handle rpc receiving streams
     for (id, stream) in rpc_receiving_streams.into_iter() {
-        let graph = graph.clone();
+        let worker = worker.clone();
         tokio::spawn(async move {
-            // handle_rpc_receiving_stream(&id, stream, graph, GraphSum).await;
-            handle_rpc_receiving_stream(&id, stream, graph, NaiveMaxAdjacentSum, dummy_rpc_len)
+            // handle_rpc_receiving_stream(&id, stream, worker, GraphSum).await;
+            handle_rpc_receiving_stream(&id, stream, worker, NaiveMaxAdjacentSum, dummy_rpc_len)
                 .await;
         });
     }
@@ -161,10 +161,10 @@ async fn main() {
     .len();
     // handle data receiving streams
     for data_receiving_stream in data_receiving_streams.into_iter() {
-        let graph = graph.clone();
+        let worker = worker.clone();
         tokio::spawn(handle_data_receiving_stream(
             data_receiving_stream,
-            graph,
+            worker,
             dummy_session_control_data_len,
         ));
     }
@@ -172,13 +172,13 @@ async fn main() {
     // Note: For testing, invoke functions on machine 1
     if machine_id == 1 {
         // Apply function and print result
-        let root = graph.get(&0);
+        let root = worker.get_vertex_by_id(&0);
         let distance = 2;
-        // let result = root.apply_function(&GraphSum, &graph, None).await;
+        // let result = root.apply_function(&GraphSum, &worker, None).await;
         let result = root
             .apply_function(
                 &NaiveMaxAdjacentSum,
-                &graph,
+                &worker,
                 Some(NMASInfo {
                     source: None,
                     distance,
@@ -186,7 +186,7 @@ async fn main() {
                 }),
             )
             .await;
-        // let result = root.apply_function(&GraphSum, &graph, None).await;
+        // let result = root.apply_function(&GraphSum, &worker, None).await;
         // println!("The graph sum is: {result}");
         println!("The Max Adjacent Sum for {distance} is: {result}");
     }
@@ -197,7 +197,7 @@ async fn main() {
 
 async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
     mut data_receiving_stream: TcpStream,
-    graph: Arc<Graph<T>>,
+    worker: Arc<Worker<T>>,
     dummy_session_control_data_len: usize,
 ) {
     // construct the reception buffer for session_header
@@ -217,7 +217,7 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
             }
             DataType::Result => {
                 // get where the channel the result should go to
-                let res_channels = graph.result_multiplexing_channels.read().await;
+                let res_channels = worker.result_multiplexing_channels.read().await;
                 let res_channel = res_channels
                     .get(&session_header.session_id)
                     .expect("session id not exist in aux_info channel")
@@ -246,7 +246,7 @@ async fn handle_rpc_receiving_stream<
 >(
     id: &MachineID,
     mut stream: TcpStream,
-    graph: Arc<Graph<T>>,
+    worker: Arc<Worker<T>>,
     _type: V,
     dummy_rpc_len: usize,
 ) {
@@ -265,19 +265,19 @@ async fn handle_rpc_receiving_stream<
                     bincode::deserialize::<U>(&aux_info).expect("Incorrect Auxiliary Info Format");
 
                 // construct variable to pass into the new thread, for non-blocking circular/recursive remote calls
-                let graph_clone = graph.clone();
+                let worker_clone = worker.clone();
                 let _type_clone = _type.clone();
                 let id_clone = id.clone();
 
                 tokio::spawn(async move {
                     // calculate the result non-blocking-ly, without holding onto locks prior to entrance
-                    let res = graph_clone
-                        .get(&v_id)
-                        .apply_function(&_type_clone, &graph_clone, aux_info)
+                    let res = worker_clone
+                        .get_vertex_by_id(&v_id)
+                        .apply_function(&_type_clone, &worker_clone, aux_info)
                         .await;
 
                     // get sending_stream as mut
-                    let sending_streams = graph_clone.sending_streams.read().await;
+                    let sending_streams = worker_clone.sending_streams.read().await;
                     let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
 
                     let res_bytes = bincode::serialize::<T>(&res).unwrap();

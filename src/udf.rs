@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::AddAssign;
 
-use crate::graph::*;
 use crate::vertex::*;
+use crate::worker::*;
 use crate::UserDefinedFunction;
 
 /* *********** Starting of User's Playground *********** */
@@ -41,16 +41,16 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        graph: &Graph<isize>,
+        worker: &Worker<isize>,
         aux_info: Option<u64>,
     ) -> isize {
         let mut count = Data(0);
         count += vertex.get_val().as_ref().unwrap().0;
 
         for sub_graph_root_id in vertex.children().iter() {
-            count += graph
-                .get(sub_graph_root_id)
-                .apply_function(self, graph, aux_info.clone())
+            count += worker
+                .get_vertex_by_id(sub_graph_root_id)
+                .apply_function(self, worker, aux_info.clone())
                 .await;
         }
         count.0
@@ -79,7 +79,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        graph: &Graph<isize>,
+        worker: &Worker<isize>,
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);
@@ -100,11 +100,11 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
 
                 // travel to neighbors with distance - 1, "started" no longer needed
                 for neighbor_id in vertex.edges() {
-                    count += graph
-                        .get(neighbor_id)
+                    count += worker
+                        .get_vertex_by_id(neighbor_id)
                         .apply_function(
                             self,
-                            graph,
+                            worker,
                             Some(NMASInfo {
                                 source: Some(vertex.id),
                                 distance: aux_info.distance - 1,
@@ -122,11 +122,11 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                 for connected_nodes_id in vertex.edges().iter() {
                     if !aux_info_started.contains(connected_nodes_id) {
                         vec_of_res.push(
-                            graph
-                                .get(connected_nodes_id)
+                            worker
+                                .get_vertex_by_id(connected_nodes_id)
                                 .apply_function(
                                     self,
-                                    graph,
+                                    worker,
                                     Some(NMASInfo {
                                         source: None,
                                         distance: aux_info.distance,
@@ -145,11 +145,11 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                 // This is not the start, travel to neighbors with distance - 1, "started" not needed
                 for neighbor_id in vertex.edges() {
                     if source.ne(neighbor_id) {
-                        count += graph
-                            .get(neighbor_id)
+                        count += worker
+                            .get_vertex_by_id(neighbor_id)
                             .apply_function(
                                 self,
-                                graph,
+                                worker,
                                 Some(NMASInfo {
                                     source: Some(vertex.id),
                                     distance: aux_info.distance - 1,

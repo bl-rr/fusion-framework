@@ -10,18 +10,18 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::graph::Graph;
 use crate::vertex::Vertex;
+use crate::worker::Worker;
 
-pub mod graph;
 pub mod rpc;
 pub mod udf;
 pub mod vertex;
+pub mod worker;
 
 /*
    Trait requirement for user-defined functions
 */
 #[async_trait]
 pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U: DeserializeOwned + Serialize> {
-    async fn execute(&self, vertex: &Vertex<T>, graph: &Graph<T>, auxiliary_information: U) -> T;
+    async fn execute(&self, vertex: &Vertex<T>, worker: &Worker<T>, auxiliary_information: U) -> T;
 }

@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
-use crate::{graph::Graph, rpc, UserDefinedFunction};
+use crate::{rpc, worker::Worker, UserDefinedFunction};
 
 /* *********** Type Aliases *********** */
 pub type VertexID = u32;
@@ -57,17 +57,17 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
     pub async fn apply_function<F: UserDefinedFunction<T, U>, U: Serialize + DeserializeOwned>(
         &self,
         udf: &F,
-        graph: &Graph<T>,
+        worker: &Worker<T>,
         auxiliary_information: U,
     ) -> T {
         match &self.v_type {
             VertexType::Local(_) | VertexType::Borrowed(_) => {
-                udf.execute(&self, graph, auxiliary_information).await
+                udf.execute(&self, worker, auxiliary_information).await
             }
             VertexType::Remote(remote_vertex) => {
                 // Delegate to the remote machine: rpc here
                 remote_vertex
-                    .remote_execute(self.id, graph, auxiliary_information)
+                    .remote_execute(self.id, worker, auxiliary_information)
                     .await
             }
         }
@@ -210,7 +210,7 @@ impl RemoteVertex {
     async fn remote_execute<T, U: Serialize + DeserializeOwned>(
         &self,
         vertex_id: VertexID,
-        graph: &Graph<T>,
+        worker: &Worker<T>,
         auxiliary_information: U,
     ) -> T
     where
@@ -222,8 +222,8 @@ impl RemoteVertex {
         let (tx, mut rx) = mpsc::channel::<T>(1000);
         let id = Uuid::new_v4();
 
-        // Step 2: Add id to the graph, to have a (id -> sending channel) mapping
-        graph
+        // Step 2: Add id to the worker's (id -> sending channel) mapping
+        worker
             .result_multiplexing_channels
             .write()
             .await
@@ -231,7 +231,7 @@ impl RemoteVertex {
 
         // Step 3: get lock on the sending stream so that all messages are sent in order, as expected
         //      (using the same rpc stream, send command and the data if necessary)
-        let rpc_sending_streams = graph.rpc_sending_streams.read().await;
+        let rpc_sending_streams = worker.rpc_sending_streams.read().await;
         let mut rpc_sending_stream = rpc_sending_streams
             .get(&self.location)
             .unwrap()
