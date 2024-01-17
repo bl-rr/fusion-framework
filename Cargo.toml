@@ -11,3 +11,7 @@ serde = { version = "1.0.195", feature = ["derive"], features = ["derive"] }
 tokio = { version = "1.35.1", features = ["full"] }
 zerocopy = "0.7.32"
 async-trait = { version = "0.1.77", features = [] }
+
+[dependencies.uuid]
+version = "1.6.1"
+features = ["v4", "fast-rng", "macro-diagnostics", "serde"]

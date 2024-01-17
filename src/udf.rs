@@ -38,7 +38,7 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        graph: &Graph<isize>,
+        graph: &Graph<isize, Option<u64>>,
         aux_info: Option<u64>,
     ) -> isize {
         let mut count = Data(0);
@@ -64,14 +64,14 @@ pub struct NaiveMaxAdjacentSum;
 
 // TODO: Check IMPL
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum Direction {
     Parent,
     Children,
     Start,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct NMASInfo {
     pub direction: Direction,
     pub distance: usize,
@@ -82,7 +82,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        graph: &Graph<isize>,
+        graph: &Graph<isize, Option<NMASInfo>>,
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);

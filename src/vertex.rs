@@ -7,7 +7,10 @@
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt::Debug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, Mutex};
+use uuid::Uuid;
 
 use crate::{graph::Graph, rpc, UserDefinedFunction};
 
@@ -52,10 +55,13 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             T: the output of the UDF, needs to be deserializable for rpc
             F: UDF that defines the execute function
     */
-    pub async fn apply_function<F: UserDefinedFunction<T, U>, U: Serialize + DeserializeOwned>(
+    pub async fn apply_function<
+        F: UserDefinedFunction<T, U>,
+        U: Serialize + DeserializeOwned + Debug,
+    >(
         &self,
         udf: &F,
-        graph: &Graph<T>,
+        graph: &Graph<T, U>,
         auxiliary_information: U,
     ) -> T {
         match &self.v_type {
@@ -198,7 +204,7 @@ impl RemoteVertex {
     async fn remote_execute<T, U: Serialize + DeserializeOwned>(
         &self,
         vertex_id: VertexID,
-        graph: &Graph<T>,
+        graph: &Graph<T, U>,
         auxiliary_information: U,
     ) -> T
     where
@@ -207,6 +213,8 @@ impl RemoteVertex {
         // TODO: Comments + check impl
 
         // The remote machine executes the function and returns the result.
+
+        // Step 1: get all locks so that all messages are sent in order (use the same rpc stream)
         let rpc_sending_streams = graph.rpc_sending_streams.read().await;
         let mut rpc_sending_stream = rpc_sending_streams
             .get(&self.location)
@@ -214,31 +222,38 @@ impl RemoteVertex {
             .lock()
             .await;
 
-        let command = bincode::serialize(&rpc::RPC::Execute(vertex_id)).unwrap();
-        rpc_sending_stream.write_all(&command).await.unwrap();
+        // Step 2: Construct channels and id
+        let (tx, mut rx) = mpsc::channel::<T>(1000);
+        let id = Uuid::new_v4();
 
-        drop(rpc_sending_stream);
-        drop(rpc_sending_streams);
+        // Step 3: Add id to have a sending channel
+        graph
+            .result_multiplexing_channels
+            .write()
+            .await
+            .insert(id, Mutex::new(tx));
 
-        let sending_streams = graph.sending_streams.read().await;
-        let mut sending_stream = sending_streams.get(&self.location).unwrap().lock().await;
-
+        // Step 4: Construct the rpc command with aux_info len
         let aux_info = bincode::serialize(&auxiliary_information).unwrap();
-        let size = aux_info.len().to_ne_bytes().to_vec();
-        let data_to_send = [size, aux_info].concat();
-        sending_stream.write_all(&data_to_send).await.unwrap();
+        let aux_info_len = aux_info.len();
+        let command = bincode::serialize(&rpc::RPC::Execute(id, vertex_id, aux_info_len)).unwrap();
 
-        let mut result_bytes = vec![0u8; std::mem::size_of::<T>()];
-
-        let receiving_streams = graph.receiving_streams.read().await;
-        let mut receiving_stream = receiving_streams.get(&self.location).unwrap().lock().await;
-
-        receiving_stream
-            .read_exact(&mut result_bytes)
+        // Step 5: Send the RPC Command and auxiliary information
+        println!("rpc sent len: {:?}", command.len());
+        println!("rpc sent : {:?}", command);
+        println!("aux_info sent: {:?}\n", aux_info);
+        rpc_sending_stream
+            .write_all(&[command, aux_info].concat())
             .await
             .unwrap();
+        // rpc_sending_stream.write_all(&aux_info).await.unwrap();
 
-        bincode::deserialize(&result_bytes).unwrap()
+        // drop(rpc_sending_stream);
+        // drop(rpc_sending_streams);
+
+        // Step 6: wait on the receiver
+        let rpc_result = rx.recv().await.unwrap();
+        rpc_result
     }
 }
 

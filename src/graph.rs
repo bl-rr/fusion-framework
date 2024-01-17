@@ -8,21 +8,24 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 use crate::vertex::*;
 
 /*
     Graph Struct that stores the (vertex_id -> vertex) mapping, acting as pointers to vertices
 */
-pub struct Graph<T: DeserializeOwned + Serialize> {
+pub struct Graph<T: DeserializeOwned + Serialize, U> {
     pub vertex_map: HashMap<VertexID, Vertex<T>>,
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
-    pub receiving_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
+    pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<T>>>>,
+    pub aux_info_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<U>>>>,
 }
 
-impl<T: DeserializeOwned + Serialize> Graph<T> {
+impl<T: DeserializeOwned + Serialize, U> Graph<T, U> {
     /*
        Constructor
     */
@@ -30,8 +33,9 @@ impl<T: DeserializeOwned + Serialize> Graph<T> {
         Graph {
             vertex_map: HashMap::new(),
             sending_streams: RwLock::new(HashMap::new()),
-            receiving_streams: RwLock::new(HashMap::new()),
             rpc_sending_streams: RwLock::new(HashMap::new()),
+            result_multiplexing_channels: RwLock::new(HashMap::new()),
+            aux_info_multiplexing_channels: RwLock::new(HashMap::new()),
         }
     }
 
@@ -90,7 +94,7 @@ impl<T: DeserializeOwned + Serialize> Graph<T> {
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now
-pub fn build_graph(graph: &mut Graph<isize>, machine_id: MachineID) {
+pub fn build_graph_integer_data<U>(graph: &mut Graph<isize, U>, machine_id: MachineID) {
     // TODO: Check IMPL
 
     match machine_id {
@@ -118,8 +122,8 @@ pub fn build_graph(graph: &mut Graph<isize>, machine_id: MachineID) {
             graph.add_new_vertex(4, &[], &[8, 9], None, VertexKind::Remote, Some(1));
 
             // Root vertex
-            graph.add_new_vertex(8, &[], &[10, 11], Some(Data(100)), VertexKind::Local, None);
-            graph.add_new_vertex(9, &[], &[12, 13], Some(Data(200)), VertexKind::Local, None);
+            graph.add_new_vertex(8, &[4], &[10, 11], Some(Data(100)), VertexKind::Local, None);
+            graph.add_new_vertex(9, &[4], &[12, 13], Some(Data(200)), VertexKind::Local, None);
 
             // First level children
             graph.add_new_vertex(10, &[8], &[], Some(Data(300)), VertexKind::Local, None);

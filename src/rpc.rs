@@ -6,6 +6,7 @@
 */
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::vertex::{MachineID, Vertex, VertexID};
 
@@ -14,11 +15,11 @@ use crate::vertex::{MachineID, Vertex, VertexID};
 */
 #[derive(Serialize, Deserialize)]
 pub enum RPC {
-    Execute(VertexID),
-    Relay(VertexID),
-    RequestData(VertexID),
-    ExecuteWithData(VertexID),
-    Update(VertexID),
+    Execute(Uuid, VertexID, usize), // usize for trailing data size
+    Relay(Uuid, VertexID, usize),
+    RequestData(Uuid, VertexID, usize),
+    ExecuteWithData(Uuid, VertexID, usize),
+    Update(Uuid, VertexID, usize),
 }
 
 /*
@@ -38,4 +39,18 @@ pub struct RPCRelay<T: Serialize + DeserializeOwned> {
 pub struct RPCData<T: Serialize + DeserializeOwned> {
     id: VertexID,
     data: Vertex<T>,
+}
+
+// communication/session control
+#[derive(Serialize, Deserialize)]
+pub struct SessionControl {
+    pub session_id: Uuid,
+    pub communication_type: DataType,
+    pub data_len: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum DataType {
+    AuxInfo,
+    Result,
 }
