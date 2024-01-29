@@ -11,9 +11,9 @@ use fusion_framework::vertex::MachineID;
 use fusion_framework::worker::{build_graph_integer_data, Worker};
 
 use fusion_framework::UserDefinedFunction;
+use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

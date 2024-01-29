@@ -5,8 +5,8 @@
    Creation Date: 1/14/2023
 */
 
+use hashbrown::HashMap;
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::HashMap;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};

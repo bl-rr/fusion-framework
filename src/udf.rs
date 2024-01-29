@@ -10,8 +10,8 @@
 */
 
 use async_trait::async_trait;
+use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::ops::AddAssign;
 
 use crate::vertex::*;
@@ -191,3 +191,5 @@ pub struct MaxBlockSum;
        3) swap largest and smallest nodes
        ...
 */
+
+pub struct SwapLargestAndSmallest;
