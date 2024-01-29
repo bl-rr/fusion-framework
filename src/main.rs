@@ -195,9 +195,9 @@ async fn main() {
     loop {}
 }
 
-async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
+async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: DeserializeOwned>(
     mut data_receiving_stream: TcpStream,
-    worker: Arc<Worker<T>>,
+    worker: Arc<Worker<T, V>>,
     dummy_session_control_data_len: usize,
 ) {
     // construct the reception buffer for session_header
@@ -232,7 +232,7 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
                     .unwrap();
 
                 // send over the result
-                let res = bincode::deserialize::<T>(&res_bytes).unwrap();
+                let res = bincode::deserialize::<V>(&res_bytes).unwrap();
                 res_channel.send(res).await.unwrap();
             }
         }
@@ -242,12 +242,13 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
 async fn handle_rpc_receiving_stream<
     T: Serialize + DeserializeOwned + Send + Sync + 'static,
     U: Serialize + DeserializeOwned + Send + Sync + 'static,
-    V: UserDefinedFunction<T, U> + Send + Sync + 'static + Clone,
+    X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
+    V: Serialize + Send + Sync + 'static,
 >(
     id: &MachineID,
     mut stream: TcpStream,
-    worker: Arc<Worker<T>>,
-    _type: V,
+    worker: Arc<Worker<T, V>>,
+    _type: X,
     dummy_rpc_len: usize,
 ) {
     // construct the buffer to receive fixed size of bytes for RPC
@@ -280,7 +281,7 @@ async fn handle_rpc_receiving_stream<
                     let sending_streams = worker_clone.sending_streams.read().await;
                     let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
 
-                    let res_bytes = bincode::serialize::<T>(&res).unwrap();
+                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
 
                     // construct session header
                     let session_header_for_result = SessionHeader {

@@ -37,11 +37,11 @@ impl AddAssign<isize> for Data<isize> {
 #[derive(Clone)]
 pub struct GraphSum;
 #[async_trait]
-impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
+impl UserDefinedFunction<isize, Option<u64>, isize> for GraphSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        worker: &Worker<isize>,
+        worker: &Worker<isize, isize>,
         aux_info: Option<u64>,
     ) -> isize {
         let mut count = Data(0);
@@ -75,11 +75,11 @@ pub struct NMASInfo {
 }
 
 #[async_trait]
-impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
+impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        worker: &Worker<isize>,
+        worker: &Worker<isize, isize>,
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);

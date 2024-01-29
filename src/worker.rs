@@ -20,14 +20,14 @@ use crate::vertex::*;
 
     TODO: Add weights to edges
 */
-pub struct Worker<T: DeserializeOwned + Serialize> {
+pub struct Worker<T: DeserializeOwned + Serialize, V> {
     pub graph: HashMap<VertexID, Vertex<T>>, // vertex_id -> vertex mapping
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
-    pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<T>>>>,
+    pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<V>>>>,
 }
 
-impl<T: DeserializeOwned + Serialize> Worker<T> {
+impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
     /*
        Constructor
     */
@@ -95,7 +95,7 @@ impl<T: DeserializeOwned + Serialize> Worker<T> {
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now
-pub fn build_graph_integer_data(worker: &mut Worker<isize>, machine_id: MachineID) {
+pub fn build_graph_integer_data(worker: &mut Worker<isize, isize>, machine_id: MachineID) {
     // Note: this is specific testing function
 
     //             Node 1:
