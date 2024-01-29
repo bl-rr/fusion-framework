@@ -132,7 +132,7 @@ async fn main() {
     println!("Simulation Set Up Complete: Communication channels");
 
     // use graph builder to build the graph based on machine_id
-    build_graph_integer_data(&mut worker, machine_id);
+    build_graph_integer_data(&mut worker, machine_id).await;
     println!("Graph built for testing");
 
     // constructing graph for multi-thread sharing
@@ -145,9 +145,9 @@ async fn main() {
     for (id, stream) in rpc_receiving_streams.into_iter() {
         let worker = worker.clone();
         tokio::spawn(async move {
-            // handle_rpc_receiving_stream(&id, stream, worker, GraphSum).await;
-            handle_rpc_receiving_stream(&id, stream, worker, NaiveMaxAdjacentSum, dummy_rpc_len)
-                .await;
+            handle_rpc_receiving_stream(&id, stream, worker, GraphSum, dummy_rpc_len).await;
+            // handle_rpc_receiving_stream(&id, stream, worker, NaiveMaxAdjacentSum, dummy_rpc_len)
+            //     .await;
         });
     }
 
@@ -172,32 +172,44 @@ async fn main() {
     // Note: For testing, invoke functions on machine 1
     if machine_id == 1 {
         // Apply function and print result
-        let root = worker.get_vertex_by_id(&0);
-        let distance = 2;
-        // let result = root.apply_function(&GraphSum, &worker, None).await;
-        let result = root
-            .apply_function(
-                &NaiveMaxAdjacentSum,
-                &worker,
-                Some(NMASInfo {
-                    source: None,
-                    distance,
-                    started: Some(HashSet::new()),
-                }),
-            )
+        let worker_read = worker
+            .graph
+            .read() // TODO: need to abstract away this
             .await;
-        // let result = root.apply_function(&GraphSum, &worker, None).await;
-        // println!("The graph sum is: {result}");
-        println!("The Max Adjacent Sum for {distance} is: {result}");
+        let root_read = worker_read
+            .get(&0) // TODO: need to abstract away this
+            .unwrap()
+            .read()
+            .await;
+
+        // let distance = 2;
+        // let result = root_read
+        //     .apply_function(
+        //         &NaiveMaxAdjacentSum,
+        //         &worker,
+        //         Some(NMASInfo {
+        //             source: None,
+        //             distance,
+        //             started: Some(HashSet::new()),
+        //         }),
+        //     )
+        //     .await;
+
+        let result = root_read.apply_function(&GraphSum, &worker, None).await;
+        println!("The graph sum is: {result}");
+        // println!("The Max Adjacent Sum for {distance} is: {result}");
     }
 
     // keeping the machine running
     loop {}
 }
 
-async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
+async fn handle_data_receiving_stream<
+    T: Serialize + DeserializeOwned,
+    V: Serialize + DeserializeOwned,
+>(
     mut data_receiving_stream: TcpStream,
-    worker: Arc<Worker<T>>,
+    worker: Arc<Worker<T, V>>,
     dummy_session_control_data_len: usize,
 ) {
     // construct the reception buffer for session_header
@@ -232,7 +244,7 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
                     .unwrap();
 
                 // send over the result
-                let res = bincode::deserialize::<T>(&res_bytes).unwrap();
+                let res = bincode::deserialize::<V>(&res_bytes).unwrap();
                 res_channel.send(res).await.unwrap();
             }
         }
@@ -242,12 +254,13 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned>(
 async fn handle_rpc_receiving_stream<
     T: Serialize + DeserializeOwned + Send + Sync + 'static,
     U: Serialize + DeserializeOwned + Send + Sync + 'static,
-    V: UserDefinedFunction<T, U> + Send + Sync + 'static + Clone,
+    X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
+    V: Serialize + DeserializeOwned + Send + Sync + 'static,
 >(
     id: &MachineID,
     mut stream: TcpStream,
-    worker: Arc<Worker<T>>,
-    _type: V,
+    worker: Arc<Worker<T, V>>,
+    _type: X,
     dummy_rpc_len: usize,
 ) {
     // construct the buffer to receive fixed size of bytes for RPC
@@ -272,7 +285,13 @@ async fn handle_rpc_receiving_stream<
                 tokio::spawn(async move {
                     // calculate the result non-blocking-ly, without holding onto locks prior to entrance
                     let res = worker_clone
-                        .get_vertex_by_id(&v_id)
+                        .graph
+                        .read()
+                        .await
+                        .get(&v_id) // TODO: need to abstract away this
+                        .unwrap()
+                        .read()
+                        .await
                         .apply_function(&_type_clone, &worker_clone, aux_info)
                         .await;
 
@@ -280,7 +299,7 @@ async fn handle_rpc_receiving_stream<
                     let sending_streams = worker_clone.sending_streams.read().await;
                     let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
 
-                    let res_bytes = bincode::serialize::<T>(&res).unwrap();
+                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
 
                     // construct session header
                     let session_header_for_result = SessionHeader {

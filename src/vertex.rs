@@ -7,6 +7,7 @@
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -54,12 +55,16 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             T: the output of the UDF, needs to be deserializable for rpc
             F: UDF that defines the execute function
     */
-    pub async fn apply_function<F: UserDefinedFunction<T, U>, U: Serialize + DeserializeOwned>(
+    pub async fn apply_function<
+        F: UserDefinedFunction<T, U, V>,
+        U: Serialize + DeserializeOwned,
+        V,
+    >(
         &self,
         udf: &F,
-        worker: &Worker<T>,
+        worker: &Worker<T, V>,
         auxiliary_information: U,
-    ) -> T {
+    ) -> V {
         match &self.v_type {
             VertexType::Local(_) | VertexType::Borrowed(_) => {
                 udf.execute(&self, worker, auxiliary_information).await
@@ -110,6 +115,17 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             VertexType::Remote(_) => {
                 // this should never be reached
                 panic!("Remote Node should not invoke get_val() function")
+            }
+        }
+    }
+    pub fn update(&mut self, new_data: T) -> Option<Data<T>> {
+        match &mut self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
+                local_v.set_data(Data(new_data))
+            }
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke update() function")
             }
         }
     }
@@ -207,19 +223,19 @@ impl RemoteVertex {
     /*
        RPC for execute
     */
-    async fn remote_execute<T, U: Serialize + DeserializeOwned>(
+    async fn remote_execute<T, U: Serialize + DeserializeOwned, V>(
         &self,
         vertex_id: VertexID,
-        worker: &Worker<T>,
+        worker: &Worker<T, V>,
         auxiliary_information: U,
-    ) -> T
+    ) -> V
     where
         T: DeserializeOwned + Serialize,
     {
         // The remote machine executes the function and returns the result.
 
         // Step 1: Construct channels and id
-        let (tx, mut rx) = mpsc::channel::<T>(1000);
+        let (tx, mut rx) = mpsc::channel::<V>(1000);
         let id = Uuid::new_v4();
 
         // Step 2: Add id to the worker's (id -> sending channel) mapping

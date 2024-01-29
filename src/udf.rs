@@ -37,11 +37,11 @@ impl AddAssign<isize> for Data<isize> {
 #[derive(Clone)]
 pub struct GraphSum;
 #[async_trait]
-impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
+impl UserDefinedFunction<isize, Option<u64>, isize> for GraphSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        worker: &Worker<isize>,
+        worker: &Worker<isize, isize>,
         aux_info: Option<u64>,
     ) -> isize {
         let mut count = Data(0);
@@ -49,7 +49,13 @@ impl UserDefinedFunction<isize, Option<u64>> for GraphSum {
 
         for sub_graph_root_id in vertex.children().iter() {
             count += worker
-                .get_vertex_by_id(sub_graph_root_id)
+                .graph
+                .read()
+                .await
+                .get(sub_graph_root_id) // TODO: need to abstract away this
+                .unwrap()
+                .read()
+                .await
                 .apply_function(self, worker, aux_info.clone())
                 .await;
         }
@@ -75,11 +81,11 @@ pub struct NMASInfo {
 }
 
 #[async_trait]
-impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
+impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize>,
-        worker: &Worker<isize>,
+        worker: &Worker<isize, isize>,
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);
@@ -100,8 +106,16 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
 
                 // travel to neighbors with distance - 1, "started" no longer needed
                 for neighbor_id in vertex.edges() {
+                    // worker.vertices[id].function_name()
+
                     count += worker
-                        .get_vertex_by_id(neighbor_id)
+                        .graph
+                        .read()
+                        .await
+                        .get(neighbor_id) // TODO: need to abstract away this
+                        .unwrap()
+                        .read()
+                        .await
                         .apply_function(
                             self,
                             worker,
@@ -123,7 +137,13 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                     if !aux_info_started.contains(connected_nodes_id) {
                         vec_of_res.push(
                             worker
-                                .get_vertex_by_id(connected_nodes_id)
+                                .graph
+                                .read()
+                                .await
+                                .get(connected_nodes_id) // TODO: need to abstract away this
+                                .unwrap()
+                                .read()
+                                .await
                                 .apply_function(
                                     self,
                                     worker,
@@ -146,7 +166,13 @@ impl UserDefinedFunction<isize, Option<NMASInfo>> for NaiveMaxAdjacentSum {
                 for neighbor_id in vertex.edges() {
                     if source.ne(neighbor_id) {
                         count += worker
-                            .get_vertex_by_id(neighbor_id)
+                            .graph
+                            .read()
+                            .await
+                            .get(neighbor_id) // TODO: need to abstract away this
+                            .unwrap()
+                            .read()
+                            .await
                             .apply_function(
                                 self,
                                 worker,
@@ -191,3 +217,32 @@ pub struct MaxBlockSum;
        3) swap largest and smallest nodes
        ...
 */
+
+pub struct PropagateParent;
+
+#[async_trait]
+impl UserDefinedFunction<isize, Option<u64>, bool> for PropagateParent {
+    async fn execute(
+        &self,
+        vertex: &Vertex<isize>,
+        worker: &Worker<isize, bool>,
+        aux_info: Option<u64>,
+    ) -> bool {
+        match aux_info {
+            None => return true,
+            Some(to_add) => vertex.update(),
+        }
+        for child_id in vertex.children() {
+            worker
+                .graph
+                .read()
+                .await
+                .get(child_id)
+                .unwrap()
+                .write()
+                .await
+                .apply_function()
+        }
+        return true;
+    }
+}
