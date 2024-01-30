@@ -5,11 +5,13 @@
    Creation Date: 1/14/2023
 */
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
+use tokio_condvar::Condvar;
 use uuid::Uuid;
 
 use crate::vertex::*;
@@ -25,6 +27,9 @@ pub struct Worker<T: DeserializeOwned + Serialize, V> {
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<V>>>>,
+    pub vertices_being_written: Arc<Mutex<HashSet<VertexID>>>,
+    pub tree_being_written: Arc<Mutex<bool>>,
+    pub vbw_cv: Arc<Condvar>,
 }
 
 impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
@@ -37,6 +42,9 @@ impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
             sending_streams: RwLock::new(HashMap::new()),
             rpc_sending_streams: RwLock::new(HashMap::new()),
             result_multiplexing_channels: RwLock::new(HashMap::new()),
+            vertices_being_written: Arc::new(Mutex::new(HashSet::new())),
+            tree_being_written: Arc::new(Mutex::new(false)),
+            vbw_cv: Arc::new(Condvar::new()),
         }
     }
 
@@ -66,6 +74,8 @@ impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
                     incoming,
                     outgoing,
                     data.expect("Local vertex must have data."),
+                    self.vertices_being_written.clone(),
+                    self.vbw_cv.clone(),
                 )),
             },
             VertexKind::Remote => {
@@ -81,6 +91,8 @@ impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
                     incoming,
                     outgoing,
                     data.expect("Borrowed vertex must have data."),
+                    self.vertices_being_written.clone(),
+                    self.vbw_cv.clone(),
                 )),
             },
         };

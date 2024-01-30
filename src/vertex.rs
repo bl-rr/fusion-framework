@@ -5,10 +5,12 @@
    Creation Date: 1/14/2023
 */
 
+use hashbrown::HashSet;
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, MutexGuard};
+use tokio_condvar::Condvar;
 use uuid::Uuid;
 
 use crate::{rpc, worker::Worker, UserDefinedFunction};
@@ -31,7 +33,6 @@ pub struct Data<T: DeserializeOwned>(pub T);
         2)  remote:     remote reference of vertex that lives on another machine/core/node
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
-#[derive(Serialize)]
 pub enum VertexType<T: DeserializeOwned + Serialize> {
     Local(LocalVertex<T>),
     Remote(RemoteVertex),
@@ -42,7 +43,6 @@ pub enum VertexType<T: DeserializeOwned + Serialize> {
 /*
    Vertex
 */
-#[derive(Serialize)]
 pub struct Vertex<T: DeserializeOwned + Serialize> {
     pub id: VertexID,
     pub v_type: VertexType<T>,
@@ -117,12 +117,22 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
             }
         }
     }
+    pub async fn update(&self, data: Data<T>) -> Option<Data<T>> {
+        match &self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
+                local_v.set_data(data, self.id).await
+            }
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke get_val() function")
+            }
+        }
+    }
 }
 
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
-#[derive(Serialize)]
 pub struct LocalVertex<T: DeserializeOwned> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
@@ -130,6 +140,8 @@ pub struct LocalVertex<T: DeserializeOwned> {
     data: Option<Data<T>>, // Using option to return the previous value (for error checking, etc.)
     borrowed_in: bool,     // When a node is a borrowed node
     leased_out: bool,      // When the current node is lent out
+    vertices_being_written: Arc<Mutex<hashbrown::HashSet<VertexID>>>,
+    vbw_cv: Arc<Condvar>,
 }
 impl<T: DeserializeOwned> LocalVertex<T> {
     /*
@@ -140,6 +152,8 @@ impl<T: DeserializeOwned> LocalVertex<T> {
         outgoing: HashSet<VertexID>,
         edges: HashSet<VertexID>,
         data: Option<Data<T>>,
+        vertices_being_written: Arc<Mutex<HashSet<VertexID>>>,
+        vbw_cv: Arc<Condvar>,
     ) -> Self {
         LocalVertex {
             incoming_edges: incoming,
@@ -148,6 +162,8 @@ impl<T: DeserializeOwned> LocalVertex<T> {
             data,
             borrowed_in: false,
             leased_out: false,
+            vertices_being_written,
+            vbw_cv,
         }
     }
 
@@ -155,7 +171,13 @@ impl<T: DeserializeOwned> LocalVertex<T> {
        Builder/Creator method for easier construction in graph constructors
        or in general when creating individual vertices
     */
-    pub fn create_vertex(incoming: &[VertexID], outgoing: &[VertexID], data: Data<T>) -> Self {
+    pub fn create_vertex(
+        incoming: &[VertexID],
+        outgoing: &[VertexID],
+        data: Data<T>,
+        vertices_being_written: Arc<Mutex<hashbrown::HashSet<VertexID>>>,
+        vbw_cv: Arc<Condvar>,
+    ) -> Self {
         LocalVertex::new(
             incoming.iter().cloned().collect(),
             outgoing.iter().cloned().collect(),
@@ -165,6 +187,8 @@ impl<T: DeserializeOwned> LocalVertex<T> {
                 .cloned()
                 .collect(),
             Some(data),
+            vertices_being_written,
+            vbw_cv,
         )
     }
 
@@ -184,11 +208,37 @@ impl<T: DeserializeOwned> LocalVertex<T> {
     pub fn get_data_mut(&mut self) -> &mut Option<Data<T>> {
         &mut self.data
     }
-    pub fn set_data(&mut self, data: Data<T>) -> Option<Data<T>> {
+    pub async fn set_data(&self, data: Data<T>, self_id: VertexID) -> Option<Data<T>> {
         if self.leased_out {
             None
         } else {
-            self.data.replace(data)
+            let old_val;
+            let mut vertices_being_written: MutexGuard<HashSet<VertexID>> =
+                self.vertices_being_written.lock().await;
+
+            // Note: The CondVar is not "Cancellation Safe", yet CondVar would be the most appropriate construct here
+            while vertices_being_written.contains(&self_id) {
+                vertices_being_written = self.vbw_cv.wait(vertices_being_written).await;
+            }
+
+            vertices_being_written.insert(self_id);
+            drop(vertices_being_written);
+
+            // now we have passed the filter
+
+            let mut_self = self as *const Self as *mut Self;
+            unsafe {
+                old_val = (*mut_self).data.take();
+                (*mut_self).data = Some(data)
+            };
+
+            // let others know I am done
+            let mut vertices_being_written: MutexGuard<HashSet<VertexID>> =
+                self.vertices_being_written.lock().await;
+            vertices_being_written.remove(&self_id);
+            self.vbw_cv.notify_one();
+
+            old_val
         }
     }
 }
