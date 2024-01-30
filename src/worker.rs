@@ -5,7 +5,7 @@
    Creation Date: 1/14/2023
 */
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
@@ -20,14 +20,16 @@ use crate::vertex::*;
 
     TODO: Add weights to edges
 */
-pub struct Worker<T: DeserializeOwned + Serialize, V> {
-    pub graph: HashMap<VertexID, Vertex<T>>, // vertex_id -> vertex mapping
+pub struct Worker<'a, T: DeserializeOwned + Serialize, V> {
+    pub graph: HashMap<VertexID, Vertex<'a, T>>, // vertex_id -> vertex mapping
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<V>>>>,
+    pub vertex_being_written: Mutex<HashSet<VertexID>>,
+    pub tree_being_modified: Mutex<bool>,
 }
 
-impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
+impl<'a, T: DeserializeOwned + Serialize, V> Worker<'a, T, V> {
     /*
        Constructor
     */
@@ -37,13 +39,15 @@ impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
             sending_streams: RwLock::new(HashMap::new()),
             rpc_sending_streams: RwLock::new(HashMap::new()),
             result_multiplexing_channels: RwLock::new(HashMap::new()),
+            vertex_being_written: Mutex::new(HashSet::new()),
+            tree_being_modified: Mutex::new(false),
         }
     }
 
     /*
        Adding an existing Vertex
     */
-    pub fn add_vertex(&mut self, v_id: VertexID, vertex: Vertex<T>) {
+    pub fn add_vertex(&mut self, v_id: VertexID, vertex: Vertex<'a, T>) {
         self.graph.insert(v_id, vertex);
     }
 
@@ -66,6 +70,7 @@ impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
                     incoming,
                     outgoing,
                     data.expect("Local vertex must have data."),
+                    &(self.vertex_being_written),
                 )),
             },
             VertexKind::Remote => {
@@ -81,11 +86,15 @@ impl<T: DeserializeOwned + Serialize, V> Worker<T, V> {
                     incoming,
                     outgoing,
                     data.expect("Borrowed vertex must have data."),
+                    &(self.vertex_being_written),
                 )),
             },
         };
 
-        self.add_vertex(id, vertex);
+        unsafe {
+            let temp = self as *const Worker<T, V> as *mut Worker<T, V>;
+            (*temp).add_vertex(id, vertex)
+        };
     }
 
     // Getter, assumes no error

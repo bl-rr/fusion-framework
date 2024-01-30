@@ -8,7 +8,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::vertex::{MachineID, Vertex, VertexID};
+use crate::vertex::{Data, MachineID, Vertex, VertexID};
 
 /*
     The initial RPC Communication
@@ -40,7 +40,7 @@ pub struct RPCRelay<T: Serialize + DeserializeOwned> {
 #[derive(Serialize)]
 pub struct RPCData<T: Serialize + DeserializeOwned> {
     id: VertexID,
-    data: Vertex<T>,
+    data: Data<T>,
 }
 
 // communication/session control

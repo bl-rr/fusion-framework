@@ -197,7 +197,7 @@ async fn main() {
 
 async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: DeserializeOwned>(
     mut data_receiving_stream: TcpStream,
-    worker: Arc<Worker<T, V>>,
+    worker: Arc<Worker<'_, T, V>>,
     dummy_session_control_data_len: usize,
 ) {
     // construct the reception buffer for session_header
@@ -247,7 +247,7 @@ async fn handle_rpc_receiving_stream<
 >(
     id: &MachineID,
     mut stream: TcpStream,
-    worker: Arc<Worker<T, V>>,
+    worker: Arc<Worker<'static, T, V>>,
     _type: X,
     dummy_rpc_len: usize,
 ) {

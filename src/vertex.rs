@@ -5,8 +5,8 @@
    Creation Date: 1/14/2023
 */
 
+use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Serialize};
-use std::collections::HashSet;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -31,23 +31,21 @@ pub struct Data<T: DeserializeOwned>(pub T);
         2)  remote:     remote reference of vertex that lives on another machine/core/node
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
-#[derive(Serialize)]
-pub enum VertexType<T: DeserializeOwned + Serialize> {
-    Local(LocalVertex<T>),
+pub enum VertexType<'a, T: DeserializeOwned + Serialize> {
+    Local(LocalVertex<'a, T>),
     Remote(RemoteVertex),
-    Borrowed(LocalVertex<T>),
+    Borrowed(LocalVertex<'a, T>),
     // Note: maybe a (Leased) variant for the future?
 }
 
 /*
    Vertex
 */
-#[derive(Serialize)]
-pub struct Vertex<T: DeserializeOwned + Serialize> {
+pub struct Vertex<'a, T: DeserializeOwned + Serialize> {
     pub id: VertexID,
-    pub v_type: VertexType<T>,
+    pub v_type: VertexType<'a, T>,
 }
-impl<T: DeserializeOwned + Serialize> Vertex<T> {
+impl<T: DeserializeOwned + Serialize> Vertex<'_, T> {
     /*
         User-Defined_Function Invoker
 
@@ -61,7 +59,7 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
     >(
         &self,
         udf: &F,
-        worker: &Worker<T, V>,
+        worker: &Worker<'_, T, V>,
         auxiliary_information: U,
     ) -> V {
         match &self.v_type {
@@ -122,16 +120,16 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
-#[derive(Serialize)]
-pub struct LocalVertex<T: DeserializeOwned> {
+pub struct LocalVertex<'a, T: DeserializeOwned> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     edges: HashSet<VertexID>,          // for simulating general graphs
     data: Option<Data<T>>, // Using option to return the previous value (for error checking, etc.)
     borrowed_in: bool,     // When a node is a borrowed node
     leased_out: bool,      // When the current node is lent out
+    vertex_being_written: &'a Mutex<HashSet<VertexID>>,
 }
-impl<T: DeserializeOwned> LocalVertex<T> {
+impl<'a, T: Serialize + DeserializeOwned> LocalVertex<'a, T> {
     /*
        Constructor
     */
@@ -140,6 +138,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
         outgoing: HashSet<VertexID>,
         edges: HashSet<VertexID>,
         data: Option<Data<T>>,
+        vertex_being_written: &'a Mutex<HashSet<VertexID>>,
     ) -> Self {
         LocalVertex {
             incoming_edges: incoming,
@@ -148,6 +147,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
             data,
             borrowed_in: false,
             leased_out: false,
+            vertex_being_written,
         }
     }
 
@@ -155,7 +155,12 @@ impl<T: DeserializeOwned> LocalVertex<T> {
        Builder/Creator method for easier construction in graph constructors
        or in general when creating individual vertices
     */
-    pub fn create_vertex(incoming: &[VertexID], outgoing: &[VertexID], data: Data<T>) -> Self {
+    pub fn create_vertex(
+        incoming: &[VertexID],
+        outgoing: &[VertexID],
+        data: Data<T>,
+        vertex_being_written: &'a Mutex<HashSet<VertexID>>,
+    ) -> Self {
         LocalVertex::new(
             incoming.iter().cloned().collect(),
             outgoing.iter().cloned().collect(),
@@ -165,6 +170,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
                 .cloned()
                 .collect(),
             Some(data),
+            vertex_being_written,
         )
     }
 
@@ -184,11 +190,17 @@ impl<T: DeserializeOwned> LocalVertex<T> {
     pub fn get_data_mut(&mut self) -> &mut Option<Data<T>> {
         &mut self.data
     }
-    pub fn set_data(&mut self, data: Data<T>) -> Option<Data<T>> {
+    pub fn set_data(&self, data: Data<T>, map: &HashMap<VertexID, Vertex<T>>) -> Option<Data<T>> {
         if self.leased_out {
             None
         } else {
-            self.data.replace(data)
+            let old_val;
+            let mut_self = self as *const Self as *mut Self;
+            unsafe {
+                old_val = (*mut_self).data.take();
+                (*mut_self).data = Some(data)
+            };
+            old_val
         }
     }
 }
@@ -214,7 +226,7 @@ impl RemoteVertex {
     async fn remote_execute<T, U: Serialize + DeserializeOwned, V>(
         &self,
         vertex_id: VertexID,
-        worker: &Worker<T, V>,
+        worker: &Worker<'_, T, V>,
         auxiliary_information: U,
     ) -> V
     where
