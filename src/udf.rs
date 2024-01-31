@@ -16,6 +16,7 @@ use crate::UserDefinedFunction;
 
 use async_trait::async_trait;
 use hashbrown::HashSet;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::ops::AddAssign;
 
@@ -68,7 +69,7 @@ pub struct NaiveMaxAdjacentSum;
 /*
    User defined auxiliary information to be passed around for each function call
 */
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize)]
 pub struct NMASInfo {
     pub source: Option<VertexID>, // if at the start then None, else encapsulates the start of the current exploration
     pub distance: usize,          // the steps the current node can use
@@ -193,4 +194,101 @@ pub struct MaxBlockSum;
        ...
 */
 
+#[derive(Clone)]
 pub struct SwapLargestAndSmallest;
+
+#[derive(Serialize, Default, Deserialize, Debug)]
+pub struct SLASInfo {
+    pub max_val: Data<isize>,
+    pub min_val: Data<isize>,
+    pub max_id: VertexID,
+    pub min_id: VertexID,
+}
+
+impl<T: DeserializeOwned + Ord + Default> PartialEq for Data<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<T: DeserializeOwned + Ord + Default> Eq for Data<T> {}
+impl<T: DeserializeOwned + Ord + Default> PartialOrd for Data<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<T: DeserializeOwned + Ord + Default> Ord for Data<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+#[async_trait]
+impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
+    async fn execute(
+        &self,
+        vertex: &Vertex<isize, SLASInfo>,
+        data_store: &DataStore<isize, SLASInfo>,
+        aux_info: bool,
+    ) -> SLASInfo {
+        if vertex.children().is_empty() {
+            // I am the leaf
+            return SLASInfo {
+                max_val: vertex.get_val().clone().unwrap(),
+                min_val: vertex.get_val().clone().unwrap(),
+                max_id: vertex.id,
+                min_id: vertex.id,
+            };
+        }
+        let mut results = vec![];
+        for children_id in vertex.children().iter() {
+            let result = data_store
+                .get_vertex_by_id(children_id)
+                .apply_function(self, data_store, false)
+                .await;
+            results.push(result);
+        }
+
+        let mut res = SLASInfo {
+            max_val: vertex.get_val().clone().unwrap(),
+            min_val: vertex.get_val().clone().unwrap(),
+            max_id: vertex.id,
+            min_id: vertex.id,
+        };
+
+        for result in results.into_iter() {
+            if result.max_val > res.max_val {
+                res.max_val = result.max_val;
+                res.max_id = result.max_id;
+            }
+            if result.min_val < res.min_val {
+                res.min_val = result.min_val;
+                res.min_id = result.min_id
+            }
+        }
+
+        // not the root
+        if !aux_info {
+            return res;
+        }
+
+        // also send out the command to update the nodes' values
+
+        let SLASInfo {
+            max_val,
+            max_id,
+            min_val,
+            min_id,
+        } = &res;
+
+        data_store
+            .get_vertex_by_id(max_id)
+            .update(min_val.clone())
+            .await;
+        data_store
+            .get_vertex_by_id(min_id)
+            .update(max_val.clone())
+            .await;
+
+        return res;
+    }
+}

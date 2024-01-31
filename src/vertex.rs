@@ -10,8 +10,9 @@ use core::fmt;
 use crate::datastore::DataStore;
 use crate::{rpc, worker::Worker, UserDefinedFunction};
 
+use crate::rpc::RPC;
 use hashbrown::HashSet;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -27,8 +28,8 @@ pub type MachineID = u32;
 /*
    Data Wrapper
 */
-#[derive(Serialize, Debug)]
-pub struct Data<T: DeserializeOwned>(pub T);
+#[derive(Serialize, Debug, Clone, Default, Deserialize)]
+pub struct Data<T: Default>(pub T);
 
 /* VertexType
    A vertex is either
@@ -37,7 +38,7 @@ pub struct Data<T: DeserializeOwned>(pub T);
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
 #[derive(Debug)]
-pub enum VertexType<T: DeserializeOwned + Serialize + fmt::Debug, V> {
+pub enum VertexType<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
     Local(LocalVertex<T, V>),
     Remote(RemoteVertex<T, V>),
     Borrowed(LocalVertex<T, V>),
@@ -48,11 +49,11 @@ pub enum VertexType<T: DeserializeOwned + Serialize + fmt::Debug, V> {
    Vertex
 */
 #[derive(Debug)]
-pub struct Vertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
+pub struct Vertex<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
     pub id: VertexID,
     pub v_type: VertexType<T, V>,
 }
-impl<T: DeserializeOwned + Serialize + fmt::Debug, V> Vertex<T, V> {
+impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> Vertex<T, V> {
     /*
         User-Defined_Function Invoker
 
@@ -126,9 +127,10 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> Vertex<T, V> {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
                 local_v.set_data(data, self.id).await
             }
-            VertexType::Remote(_) => {
-                // this should never be reached
-                panic!("Remote Node should not invoke get_val() function")
+            VertexType::Remote(remote_v) => {
+                // TODO: add some meaningful return later
+                remote_v.remote_update(data, self.id).await;
+                Some(Data::default())
             }
         }
     }
@@ -137,7 +139,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> Vertex<T, V> {
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
-pub struct LocalVertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
+pub struct LocalVertex<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     edges: HashSet<VertexID>,          // for simulating general graphs
@@ -147,7 +149,7 @@ pub struct LocalVertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
     worker: Arc<Worker<T, V>>,
 }
 
-impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for LocalVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> fmt::Debug for LocalVertex<T, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalVertex")
             .field("incoming_edges", &self.incoming_edges)
@@ -158,7 +160,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for LocalVertex
     }
 }
 
-impl<T: DeserializeOwned + Serialize + fmt::Debug, V> LocalVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> LocalVertex<T, V> {
     /*
        Constructor
     */
@@ -270,7 +272,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for RemoteVerte
 /*
    Remote References to other vertices
 */
-impl<T: DeserializeOwned + Serialize + fmt::Debug, V> RemoteVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> RemoteVertex<T, V> {
     /*
        Constructor
     */
@@ -282,6 +284,8 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> RemoteVertex<T, V> {
         }
     }
 
+    // TODO: should all of these be non-blocking? In the sense that within the udf they can proceed without waiting for a response?
+
     /*
        RPC for execute
     */
@@ -289,10 +293,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> RemoteVertex<T, V> {
         &self,
         vertex_id: VertexID,
         auxiliary_information: U,
-    ) -> V
-    where
-        T: DeserializeOwned + Serialize,
-    {
+    ) -> V {
         // The remote machine executes the function and returns the result.
 
         // Step 1: Construct channels and id
@@ -318,7 +319,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> RemoteVertex<T, V> {
         // Step 4: Construct the aux_info byte array, the rpc command with aux_info len
         let aux_info = bincode::serialize(&auxiliary_information).unwrap();
         let aux_info_len = aux_info.len();
-        let command = bincode::serialize(&rpc::RPC::Execute(id, vertex_id, aux_info_len)).unwrap();
+        let command = bincode::serialize(&RPC::Execute(id, vertex_id, aux_info_len)).unwrap();
 
         // Step 5: Send the RPC Command and auxiliary information
         rpc_sending_stream
@@ -333,6 +334,50 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> RemoteVertex<T, V> {
         // Step 7: Wait on the receiver and return result
         let rpc_result = rx.recv().await.unwrap();
         rpc_result
+    }
+
+    /*
+       RPC for update
+    */
+    // Note: maybe refactor later for DRY principle
+    async fn remote_update(&self, data: Data<T>, v_id: VertexID) {
+        // Step 1: Construct channels and id
+        let (tx, mut rx) = mpsc::channel::<V>(1000);
+        let id = Uuid::new_v4();
+
+        // Step 2: Add id to the worker's (id -> sending channel) mapping
+        self.worker
+            .result_multiplexing_channels
+            .write()
+            .await
+            .insert(id, Mutex::new(tx));
+
+        // Step 3: get lock on the sending stream so that all messages are sent in order, as expected
+        //      (using the same rpc stream, send command and the data if necessary)
+        let rpc_sending_streams = self.worker.rpc_sending_streams.read().await;
+        let mut rpc_sending_stream = rpc_sending_streams
+            .get(&self.location)
+            .unwrap()
+            .lock()
+            .await;
+
+        // Step 4: Construct the data byte array, the rpc command with data len
+        let data_bytes = bincode::serialize(&data).unwrap();
+        let size = data_bytes.len();
+        let command = bincode::serialize(&RPC::Update(id, v_id, size)).unwrap();
+
+        // Step 5: Send the RPC Command and auxiliary information
+        rpc_sending_stream
+            .write_all(&[command, data_bytes].concat())
+            .await
+            .unwrap();
+
+        // Step 6: Drop the sender before waiting/blocking/yielding
+        drop(rpc_sending_stream);
+        drop(rpc_sending_streams);
+
+        // Step 7: Wait on the receiver and return result
+        let rpc_result = rx.recv().await.unwrap();
     }
 }
 

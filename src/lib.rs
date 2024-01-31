@@ -27,10 +27,10 @@ pub mod worker;
 */
 #[async_trait]
 pub trait UserDefinedFunction<
-    T: DeserializeOwned + Serialize + fmt::Debug,
+    T: DeserializeOwned + Serialize + fmt::Debug + Default,
     U: DeserializeOwned + Serialize,
     V,
->
+>: Clone
 {
     async fn execute(
         &self,

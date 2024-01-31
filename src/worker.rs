@@ -29,7 +29,7 @@ pub struct Worker<T: DeserializeOwned + Serialize, V> {
     // pub graph: HashMap<VertexID, Vertex<T>>, // vertex_id -> vertex mapping
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
-    pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<V>>>>,
+    pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<V>>>>, // Note: maybe make the result either (V, or Data<T>, or T)
     pub vertices_being_written: Arc<Mutex<HashSet<VertexID>>>,
     pub tree_being_written: Arc<Mutex<bool>>,
     pub vbw_cv: Arc<Condvar>,

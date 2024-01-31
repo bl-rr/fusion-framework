@@ -29,7 +29,7 @@ pub enum RPC {
     Subsequent commands that send data
 */
 #[derive(Serialize)]
-pub struct RPCRelay<T: Serialize + DeserializeOwned> {
+pub struct RPCRelay<T: Serialize + DeserializeOwned + Default> {
     machine_id: MachineID,
     rpc_data: RPCData<T>,
 }
@@ -39,7 +39,7 @@ pub struct RPCRelay<T: Serialize + DeserializeOwned> {
        the vertex/vertices to be sent
 */
 #[derive(Serialize)]
-pub struct RPCData<T: Serialize + DeserializeOwned> {
+pub struct RPCData<T: Serialize + DeserializeOwned + Default> {
     id: VertexID,
     data: Data<T>,
 }
@@ -54,6 +54,7 @@ pub struct SessionHeader {
 
 #[derive(Serialize, Deserialize)]
 pub enum DataType {
-    Result,
-    NotYetNeeded, // Note: for later use
+    RPCDataResult, // conveys data
+    UpdateRes,     // Ack
+    NotYetNeeded,  // Note: for later use
 }

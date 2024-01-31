@@ -20,13 +20,13 @@ use serde::Serialize;
 use std::sync::Arc;
 
 #[derive(Default)]
-pub struct DataStore<T: Serialize + DeserializeOwned + fmt::Debug, V>(
+pub struct DataStore<T: Serialize + DeserializeOwned + fmt::Debug + Default, V>(
     HashMap<VertexID, Vertex<T, V>>,
 ); // vertex_id -> vertex mapping
 
 impl<T, V> fmt::Debug for DataStore<T, V>
 where
-    T: Serialize + DeserializeOwned + fmt::Debug,
+    T: Serialize + DeserializeOwned + fmt::Debug + Default,
     V: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -38,7 +38,7 @@ where
     }
 }
 
-impl<T: Serialize + DeserializeOwned + fmt::Debug, V> DataStore<T, V> {
+impl<T: Serialize + DeserializeOwned + fmt::Debug + Default, V> DataStore<T, V> {
     /*
        Adding an existing Vertex
     */
@@ -97,10 +97,10 @@ impl<T: Serialize + DeserializeOwned + fmt::Debug, V> DataStore<T, V> {
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now
-pub fn build_graph_integer_data(
-    data_store: &mut DataStore<isize, isize>,
+pub fn build_graph_integer_data<V>(
+    data_store: &mut DataStore<isize, V>,
     machine_id: MachineID,
-    worker: Arc<Worker<isize, isize>>,
+    worker: Arc<Worker<isize, V>>,
 ) {
     // Note: this is specific testing function
 
@@ -224,6 +224,44 @@ pub fn build_graph_integer_data(
                 Some(2),
                 worker.clone(),
             );
+
+            // adding pure remote nodes, don't need to know where they are
+            data_store.add_new_vertex(
+                10,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(2),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                11,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(2),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                12,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(2),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                13,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(2),
+                worker.clone(),
+            );
         }
         2 => {
             // Parent of the roots
@@ -292,6 +330,80 @@ pub fn build_graph_integer_data(
                 Some(Data(600)),
                 VertexKind::Local,
                 None,
+                worker.clone(),
+            );
+
+            // adding pure remote nodes, don't need to know where they are
+            data_store.add_new_vertex(
+                0,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                1,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                2,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                3,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                4,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                5,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                6,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
+                worker.clone(),
+            );
+            data_store.add_new_vertex(
+                7,
+                &[],
+                &[],
+                None,
+                VertexKind::Remote,
+                Some(1),
                 worker.clone(),
             );
         }

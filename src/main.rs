@@ -10,8 +10,8 @@ use core::fmt;
 
 use fusion_framework::datastore::{build_graph_integer_data, DataStore};
 use fusion_framework::rpc::{DataType, SessionHeader, RPC};
-use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum};
-use fusion_framework::vertex::MachineID;
+use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum, SwapLargestAndSmallest};
+use fusion_framework::vertex::{Data, MachineID};
 use fusion_framework::worker::Worker;
 use fusion_framework::UserDefinedFunction;
 
@@ -19,12 +19,16 @@ use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: DeserializeOwned>(
+async fn handle_data_receiving_stream<
+    T: Serialize + DeserializeOwned,
+    V: DeserializeOwned + Default,
+>(
     mut data_receiving_stream: TcpStream,
     worker: Arc<Worker<T, V>>,
     dummy_session_control_data_len: usize,
@@ -44,7 +48,7 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: Deseri
             DataType::NotYetNeeded => {
                 unimplemented!()
             }
-            DataType::Result => {
+            DataType::RPCDataResult => {
                 // get where the channel the result should go to
                 let res_channels = worker.result_multiplexing_channels.read().await;
                 let res_channel = res_channels
@@ -64,12 +68,24 @@ async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: Deseri
                 let res = bincode::deserialize::<V>(&res_bytes).unwrap();
                 res_channel.send(res).await.unwrap();
             }
+            DataType::UpdateRes => {
+                // get where the channel the result should go to
+                let res_channels = worker.result_multiplexing_channels.read().await;
+                let res_channel = res_channels
+                    .get(&session_header.session_id)
+                    .expect("session id not exist in aux_info channel")
+                    .lock()
+                    .await;
+
+                // TODO: Maybe optimize here later
+                res_channel.send(V::default()).await.unwrap();
+            }
         }
     }
 }
 
 async fn handle_rpc_receiving_stream<
-    T: Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug,
+    T: Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug + Default,
     U: Serialize + DeserializeOwned + Send + Sync + 'static,
     X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
     V: Serialize + Send + Sync + 'static,
@@ -117,7 +133,7 @@ async fn handle_rpc_receiving_stream<
                     // construct session header
                     let session_header_for_result = SessionHeader {
                         session_id: uuid,
-                        session_type: DataType::Result,
+                        session_type: DataType::RPCDataResult,
                         data_len: res_bytes.len(),
                     };
 
@@ -140,8 +156,38 @@ async fn handle_rpc_receiving_stream<
             RPC::ExecuteWithData(_, _, _) => {
                 unimplemented!()
             }
-            RPC::Update(_, _, _) => {
-                unimplemented!()
+            RPC::Update(uuid, v_id, data_len) => {
+                // construct the buffer for data and receive it
+                let mut data = vec![0u8; data_len];
+                stream.read_exact(&mut data).await.unwrap();
+                // it comes in the same RPC stream as noted in remote_execute()
+
+                let data = bincode::deserialize::<Data<T>>(&data)
+                    .expect("Incorrect Auxiliary Info Format");
+
+                // Note: Different here, doesn't need to multi-thread here, as update is pure local
+                // calculate the result non-blocking-ly, without holding onto locks prior to entrance
+                let res = data_store.get_vertex_by_id(&v_id).update(data).await;
+
+                // get sending_stream as mut
+                let sending_streams = worker.sending_streams.read().await;
+                let mut sending_stream = sending_streams.get(id).unwrap().lock().await;
+
+                // construct session header
+                let session_header_for_result = SessionHeader {
+                    session_id: uuid,
+                    session_type: DataType::UpdateRes,
+                    data_len: 0,
+                };
+
+                let session_header_for_result_bytes =
+                    bincode::serialize(&session_header_for_result).unwrap();
+
+                // send all the data
+                sending_stream
+                    .write_all(&session_header_for_result_bytes)
+                    .await
+                    .unwrap();
             }
         }
     }
@@ -278,12 +324,20 @@ async fn main() {
         tokio::spawn(async move {
             // handle_rpc_receiving_stream(&id, stream, worker, data_store, &GraphSum, dummy_rpc_len)
             //     .await;
+            // handle_rpc_receiving_stream(
+            //     &id,
+            //     stream,
+            //     worker,
+            //     data_store,
+            //     &NaiveMaxAdjacentSum,
+            //     dummy_rpc_len,
+            // )
             handle_rpc_receiving_stream(
                 &id,
                 stream,
                 worker,
                 data_store,
-                &NaiveMaxAdjacentSum,
+                &SwapLargestAndSmallest,
                 dummy_rpc_len,
             )
             .await;
@@ -293,7 +347,7 @@ async fn main() {
     // getting fixed size for reception
     let dummy_session_control_data_len = bincode::serialize(&SessionHeader {
         session_id: Uuid::default(),
-        session_type: DataType::Result,
+        session_type: DataType::RPCDataResult,
         data_len: 0,
     })
     .unwrap()
@@ -307,6 +361,7 @@ async fn main() {
             dummy_session_control_data_len,
         ));
     }
+    println!("BEFORE!\n{:?}\n\n", data_store);
 
     // Note: For testing, invoke functions on machine 1
     if machine_id == 1 {
@@ -314,23 +369,31 @@ async fn main() {
         let root = data_store.get_vertex_by_id(&0);
         let distance = 2;
         // let result = root.apply_function(&GraphSum, &data_store, None).await;
+        // let result = root
+        //     .apply_function(
+        //         &NaiveMaxAdjacentSum,
+        //         &data_store,
+        //         Some(NMASInfo {
+        //             source: None,
+        //             distance,
+        //             started: Some(HashSet::new()),
+        //         }),
+        //     )
+        //     .await;
         let result = root
-            .apply_function(
-                &NaiveMaxAdjacentSum,
-                &data_store,
-                Some(NMASInfo {
-                    source: None,
-                    distance,
-                    started: Some(HashSet::new()),
-                }),
-            )
+            .apply_function(&SwapLargestAndSmallest, &data_store, true)
             .await;
         // let result = root.apply_function(&GraphSum, &data_store, None).await;
-        // println!("The graph sum is: {result}");
-        println!("The Max Adjacent Sum for {distance} is: {result}");
 
-        println!("{:?}", data_store);
+        // println!("The graph sum is: {result}");
+        // println!("The Max Adjacent Sum for {distance} is: {result}");
+
+        println!("the result to swap largest and smallest is: {:?}", result);
+    } else {
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
+
+    println!("AFTER~\n{:?}", data_store);
 
     // keeping the machine running
     loop {}
