@@ -7,6 +7,8 @@
    Creation Date: 1/30/2024
 */
 
+use core::fmt;
+
 use crate::vertex::{
     Data, LocalVertex, MachineID, RemoteVertex, Vertex, VertexID, VertexKind, VertexType,
 };
@@ -18,9 +20,25 @@ use serde::Serialize;
 use std::sync::Arc;
 
 #[derive(Default)]
-pub struct DataStore<T: Serialize + DeserializeOwned, V>(HashMap<VertexID, Vertex<T, V>>); // vertex_id -> vertex mapping
+pub struct DataStore<T: Serialize + DeserializeOwned + fmt::Debug, V>(
+    HashMap<VertexID, Vertex<T, V>>,
+); // vertex_id -> vertex mapping
 
-impl<T: Serialize + DeserializeOwned, V> DataStore<T, V> {
+impl<T, V> fmt::Debug for DataStore<T, V>
+where
+    T: Serialize + DeserializeOwned + fmt::Debug,
+    V: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "DataStore {{")?;
+        for (_, vertex) in &self.0 {
+            writeln!(f, "\t{:?}", vertex)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+impl<T: Serialize + DeserializeOwned + fmt::Debug, V> DataStore<T, V> {
     /*
        Adding an existing Vertex
     */

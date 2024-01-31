@@ -5,6 +5,8 @@
    Author: Binghong(Leo) Li
    Creation Date: 1/14/2024
 */
+use core::fmt;
+
 use crate::datastore::DataStore;
 use crate::{rpc, worker::Worker, UserDefinedFunction};
 
@@ -25,7 +27,7 @@ pub type MachineID = u32;
 /*
    Data Wrapper
 */
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Data<T: DeserializeOwned>(pub T);
 
 /* VertexType
@@ -34,7 +36,8 @@ pub struct Data<T: DeserializeOwned>(pub T);
         2)  remote:     remote reference of vertex that lives on another machine/core/node
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
-pub enum VertexType<T: DeserializeOwned + Serialize, V> {
+#[derive(Debug)]
+pub enum VertexType<T: DeserializeOwned + Serialize + fmt::Debug, V> {
     Local(LocalVertex<T, V>),
     Remote(RemoteVertex<T, V>),
     Borrowed(LocalVertex<T, V>),
@@ -44,11 +47,12 @@ pub enum VertexType<T: DeserializeOwned + Serialize, V> {
 /*
    Vertex
 */
-pub struct Vertex<T: DeserializeOwned + Serialize, V> {
+#[derive(Debug)]
+pub struct Vertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
     pub id: VertexID,
     pub v_type: VertexType<T, V>,
 }
-impl<T: DeserializeOwned + Serialize, V> Vertex<T, V> {
+impl<T: DeserializeOwned + Serialize + fmt::Debug, V> Vertex<T, V> {
     /*
         User-Defined_Function Invoker
 
@@ -133,7 +137,7 @@ impl<T: DeserializeOwned + Serialize, V> Vertex<T, V> {
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
-pub struct LocalVertex<T: DeserializeOwned + Serialize, V> {
+pub struct LocalVertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     edges: HashSet<VertexID>,          // for simulating general graphs
@@ -142,7 +146,19 @@ pub struct LocalVertex<T: DeserializeOwned + Serialize, V> {
     leased_out: bool,      // When the current node is lent out
     worker: Arc<Worker<T, V>>,
 }
-impl<T: DeserializeOwned + Serialize, V> LocalVertex<T, V> {
+
+impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for LocalVertex<T, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalVertex")
+            .field("incoming_edges", &self.incoming_edges)
+            .field("outgoing_edges", &self.outgoing_edges)
+            .field("edges", &self.edges)
+            .field("data", &self.data)
+            .finish()
+    }
+}
+
+impl<T: DeserializeOwned + Serialize + fmt::Debug, V> LocalVertex<T, V> {
     /*
        Constructor
     */
@@ -238,15 +254,23 @@ impl<T: DeserializeOwned + Serialize, V> LocalVertex<T, V> {
     }
 }
 
-pub struct RemoteVertex<T: DeserializeOwned + Serialize, V> {
+pub struct RemoteVertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
     location: MachineID,
     worker: Arc<Worker<T, V>>,
     _marker: PhantomData<T>,
 }
+
+impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for RemoteVertex<T, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteVertex")
+            .field("location", &self.location)
+            .finish()
+    }
+}
 /*
    Remote References to other vertices
 */
-impl<T: DeserializeOwned + Serialize, V> RemoteVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + fmt::Debug, V> RemoteVertex<T, V> {
     /*
        Constructor
     */

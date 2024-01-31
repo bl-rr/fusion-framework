@@ -6,6 +6,8 @@
    Creation Date: 1/14/2024
 */
 
+use core::fmt;
+
 use fusion_framework::datastore::{build_graph_integer_data, DataStore};
 use fusion_framework::rpc::{DataType, SessionHeader, RPC};
 use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum};
@@ -21,6 +23,129 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: DeserializeOwned>(
+    mut data_receiving_stream: TcpStream,
+    worker: Arc<Worker<T, V>>,
+    dummy_session_control_data_len: usize,
+) {
+    // construct the reception buffer for session_header
+    let mut session_header_bytes = vec![0u8; dummy_session_control_data_len];
+
+    // each time, start with receiving the header
+    while let Ok(_) = data_receiving_stream
+        .read_exact(&mut session_header_bytes)
+        .await
+    {
+        let session_header = bincode::deserialize::<SessionHeader>(&session_header_bytes).unwrap();
+
+        // depending the type, do different things
+        match &session_header.session_type {
+            DataType::NotYetNeeded => {
+                unimplemented!()
+            }
+            DataType::Result => {
+                // get where the channel the result should go to
+                let res_channels = worker.result_multiplexing_channels.read().await;
+                let res_channel = res_channels
+                    .get(&session_header.session_id)
+                    .expect("session id not exist in aux_info channel")
+                    .lock()
+                    .await;
+
+                // construct the data buffer and receive them
+                let mut res_bytes = vec![0u8; session_header.data_len];
+                data_receiving_stream
+                    .read_exact(&mut res_bytes)
+                    .await
+                    .unwrap();
+
+                // send over the result
+                let res = bincode::deserialize::<V>(&res_bytes).unwrap();
+                res_channel.send(res).await.unwrap();
+            }
+        }
+    }
+}
+
+async fn handle_rpc_receiving_stream<
+    T: Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug,
+    U: Serialize + DeserializeOwned + Send + Sync + 'static,
+    X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
+    V: Serialize + Send + Sync + 'static,
+>(
+    id: &MachineID,
+    mut stream: TcpStream,
+    worker: Arc<Worker<T, V>>,
+    data_store: Arc<DataStore<T, V>>,
+    _type: &X,
+    dummy_rpc_len: usize,
+) {
+    // construct the buffer to receive fixed size of bytes for RPC
+    let mut cmd = vec![0u8; dummy_rpc_len];
+
+    while let Ok(_) = stream.read_exact(&mut cmd).await {
+        match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
+            RPC::Execute(uuid, v_id, aux_info_len) => {
+                // construct the buffer for auxiliary information and receive it
+                let mut aux_info = vec![0u8; aux_info_len];
+                stream.read_exact(&mut aux_info).await.unwrap();
+                // it comes in the same RPC stream as noted in remote_execute()
+
+                let aux_info =
+                    bincode::deserialize::<U>(&aux_info).expect("Incorrect Auxiliary Info Format");
+
+                // construct variable to pass into the new thread, for non-blocking circular/recursive remote calls
+                let worker_clone = worker.clone();
+                let data_store_clone = data_store.clone();
+                let _type_clone = _type.clone();
+                let id_clone = id.clone();
+
+                tokio::spawn(async move {
+                    // calculate the result non-blocking-ly, without holding onto locks prior to entrance
+                    let res = data_store_clone
+                        .get_vertex_by_id(&v_id)
+                        .apply_function(&_type_clone, &data_store_clone, aux_info)
+                        .await;
+
+                    // get sending_stream as mut
+                    let sending_streams = worker_clone.sending_streams.read().await;
+                    let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
+
+                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
+
+                    // construct session header
+                    let session_header_for_result = SessionHeader {
+                        session_id: uuid,
+                        session_type: DataType::Result,
+                        data_len: res_bytes.len(),
+                    };
+
+                    let session_header_for_result_bytes =
+                        bincode::serialize(&session_header_for_result).unwrap();
+
+                    // send all the data
+                    sending_stream
+                        .write_all(&[session_header_for_result_bytes, res_bytes].concat())
+                        .await
+                        .unwrap();
+                });
+            }
+            RPC::Relay(_, _, _) => {
+                unimplemented!()
+            }
+            RPC::RequestData(_, _, _) => {
+                unimplemented!()
+            }
+            RPC::ExecuteWithData(_, _, _) => {
+                unimplemented!()
+            }
+            RPC::Update(_, _, _) => {
+                unimplemented!()
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -203,131 +328,10 @@ async fn main() {
         // let result = root.apply_function(&GraphSum, &data_store, None).await;
         // println!("The graph sum is: {result}");
         println!("The Max Adjacent Sum for {distance} is: {result}");
+
+        println!("{:?}", data_store);
     }
 
     // keeping the machine running
     loop {}
-}
-
-async fn handle_data_receiving_stream<T: Serialize + DeserializeOwned, V: DeserializeOwned>(
-    mut data_receiving_stream: TcpStream,
-    worker: Arc<Worker<T, V>>,
-    dummy_session_control_data_len: usize,
-) {
-    // construct the reception buffer for session_header
-    let mut session_header_bytes = vec![0u8; dummy_session_control_data_len];
-
-    // each time, start with receiving the header
-    while let Ok(_) = data_receiving_stream
-        .read_exact(&mut session_header_bytes)
-        .await
-    {
-        let session_header = bincode::deserialize::<SessionHeader>(&session_header_bytes).unwrap();
-
-        // depending the type, do different things
-        match &session_header.session_type {
-            DataType::NotYetNeeded => {
-                unimplemented!()
-            }
-            DataType::Result => {
-                // get where the channel the result should go to
-                let res_channels = worker.result_multiplexing_channels.read().await;
-                let res_channel = res_channels
-                    .get(&session_header.session_id)
-                    .expect("session id not exist in aux_info channel")
-                    .lock()
-                    .await;
-
-                // construct the data buffer and receive them
-                let mut res_bytes = vec![0u8; session_header.data_len];
-                data_receiving_stream
-                    .read_exact(&mut res_bytes)
-                    .await
-                    .unwrap();
-
-                // send over the result
-                let res = bincode::deserialize::<V>(&res_bytes).unwrap();
-                res_channel.send(res).await.unwrap();
-            }
-        }
-    }
-}
-
-async fn handle_rpc_receiving_stream<
-    T: Serialize + DeserializeOwned + Send + Sync + 'static,
-    U: Serialize + DeserializeOwned + Send + Sync + 'static,
-    X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
-    V: Serialize + Send + Sync + 'static,
->(
-    id: &MachineID,
-    mut stream: TcpStream,
-    worker: Arc<Worker<T, V>>,
-    data_store: Arc<DataStore<T, V>>,
-    _type: &X,
-    dummy_rpc_len: usize,
-) {
-    // construct the buffer to receive fixed size of bytes for RPC
-    let mut cmd = vec![0u8; dummy_rpc_len];
-
-    while let Ok(_) = stream.read_exact(&mut cmd).await {
-        match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
-            RPC::Execute(uuid, v_id, aux_info_len) => {
-                // construct the buffer for auxiliary information and receive it
-                let mut aux_info = vec![0u8; aux_info_len];
-                stream.read_exact(&mut aux_info).await.unwrap();
-                // it comes in the same RPC stream as noted in remote_execute()
-
-                let aux_info =
-                    bincode::deserialize::<U>(&aux_info).expect("Incorrect Auxiliary Info Format");
-
-                // construct variable to pass into the new thread, for non-blocking circular/recursive remote calls
-                let worker_clone = worker.clone();
-                let data_store_clone = data_store.clone();
-                let _type_clone = _type.clone();
-                let id_clone = id.clone();
-
-                tokio::spawn(async move {
-                    // calculate the result non-blocking-ly, without holding onto locks prior to entrance
-                    let res = data_store_clone
-                        .get_vertex_by_id(&v_id)
-                        .apply_function(&_type_clone, &data_store_clone, aux_info)
-                        .await;
-
-                    // get sending_stream as mut
-                    let sending_streams = worker_clone.sending_streams.read().await;
-                    let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
-
-                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
-
-                    // construct session header
-                    let session_header_for_result = SessionHeader {
-                        session_id: uuid,
-                        session_type: DataType::Result,
-                        data_len: res_bytes.len(),
-                    };
-
-                    let session_header_for_result_bytes =
-                        bincode::serialize(&session_header_for_result).unwrap();
-
-                    // send all the data
-                    sending_stream
-                        .write_all(&[session_header_for_result_bytes, res_bytes].concat())
-                        .await
-                        .unwrap();
-                });
-            }
-            RPC::Relay(_, _, _) => {
-                unimplemented!()
-            }
-            RPC::RequestData(_, _, _) => {
-                unimplemented!()
-            }
-            RPC::ExecuteWithData(_, _, _) => {
-                unimplemented!()
-            }
-            RPC::Update(_, _, _) => {
-                unimplemented!()
-            }
-        }
-    }
 }

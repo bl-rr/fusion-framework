@@ -7,6 +7,8 @@
    Creation Date: 1/14/2024
 */
 
+use core::fmt;
+
 use crate::datastore::DataStore;
 use crate::vertex::Vertex;
 
@@ -24,7 +26,12 @@ pub mod worker;
    Trait requirement for user-defined functions
 */
 #[async_trait]
-pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U: DeserializeOwned + Serialize, V> {
+pub trait UserDefinedFunction<
+    T: DeserializeOwned + Serialize + fmt::Debug,
+    U: DeserializeOwned + Serialize,
+    V,
+>
+{
     async fn execute(
         &self,
         vertex: &Vertex<T, V>,
