@@ -1,18 +1,20 @@
 /* lib.rs
+
    Amalgamation of imports, to keep everything under the same crate root.
    Also includes all information users should need when constructing the custom function
 
    Author: Binghong(Leo) Li
-   Creation Date: 1/14/2023
+   Creation Date: 1/14/2024
 */
+
+use crate::datastore::DataStore;
+use crate::vertex::Vertex;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::vertex::Vertex;
-use crate::worker::Worker;
-
+pub mod datastore;
 pub mod rpc;
 pub mod udf;
 pub mod vertex;
@@ -25,8 +27,8 @@ pub mod worker;
 pub trait UserDefinedFunction<T: DeserializeOwned + Serialize, U: DeserializeOwned + Serialize, V> {
     async fn execute(
         &self,
-        vertex: &Vertex<T>,
-        worker: &Worker<T, V>,
+        vertex: &Vertex<T, V>,
+        data_store: &DataStore<T, V>,
         auxiliary_information: U,
     ) -> V;
 }

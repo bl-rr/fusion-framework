@@ -1,16 +1,18 @@
 /* main.rs
+
    Testing Ground as of now
 
    Author: Binghong(Leo) Li
-   Creation Date: 1/14/2023
+   Creation Date: 1/14/2024
 */
 
+use fusion_framework::datastore::{build_graph_integer_data, DataStore};
 use fusion_framework::rpc::{DataType, SessionHeader, RPC};
 use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum};
 use fusion_framework::vertex::MachineID;
-use fusion_framework::worker::{build_graph_integer_data, Worker};
-
+use fusion_framework::worker::Worker;
 use fusion_framework::UserDefinedFunction;
+
 use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -49,7 +51,7 @@ async fn main() {
     println!("Listening on {}", local_address);
 
     // Create new worker instance
-    let mut worker = Worker::new();
+    let worker = Worker::new();
 
     match machine_id {
         // the order of communication is crucial for initial setup
@@ -131,12 +133,15 @@ async fn main() {
 
     println!("Simulation Set Up Complete: Communication channels");
 
-    // use graph builder to build the graph based on machine_id
-    build_graph_integer_data(&mut worker, machine_id);
-    println!("Graph built for testing");
-
     // constructing graph for multi-thread sharing
     let worker = Arc::new(worker);
+    let mut data_store = DataStore::default();
+
+    // use graph builder to build the graph based on machine_id
+    build_graph_integer_data(&mut data_store, machine_id, worker.clone());
+    println!("Graph built for testing");
+
+    let data_store = Arc::new(data_store);
 
     // getting fixed size for reception
     let dummy_rpc = RPC::Execute(Uuid::default(), 0, 0);
@@ -144,10 +149,19 @@ async fn main() {
     // handle rpc receiving streams
     for (id, stream) in rpc_receiving_streams.into_iter() {
         let worker = worker.clone();
+        let data_store = data_store.clone();
         tokio::spawn(async move {
-            // handle_rpc_receiving_stream(&id, stream, worker, GraphSum).await;
-            handle_rpc_receiving_stream(&id, stream, worker, NaiveMaxAdjacentSum, dummy_rpc_len)
-                .await;
+            // handle_rpc_receiving_stream(&id, stream, worker, data_store, &GraphSum, dummy_rpc_len)
+            //     .await;
+            handle_rpc_receiving_stream(
+                &id,
+                stream,
+                worker,
+                data_store,
+                &NaiveMaxAdjacentSum,
+                dummy_rpc_len,
+            )
+            .await;
         });
     }
 
@@ -172,13 +186,13 @@ async fn main() {
     // Note: For testing, invoke functions on machine 1
     if machine_id == 1 {
         // Apply function and print result
-        let root = worker.get_vertex_by_id(&0);
+        let root = data_store.get_vertex_by_id(&0);
         let distance = 2;
-        // let result = root.apply_function(&GraphSum, &worker, None).await;
+        // let result = root.apply_function(&GraphSum, &data_store, None).await;
         let result = root
             .apply_function(
                 &NaiveMaxAdjacentSum,
-                &worker,
+                &data_store,
                 Some(NMASInfo {
                     source: None,
                     distance,
@@ -186,7 +200,7 @@ async fn main() {
                 }),
             )
             .await;
-        // let result = root.apply_function(&GraphSum, &worker, None).await;
+        // let result = root.apply_function(&GraphSum, &data_store, None).await;
         // println!("The graph sum is: {result}");
         println!("The Max Adjacent Sum for {distance} is: {result}");
     }
@@ -248,7 +262,8 @@ async fn handle_rpc_receiving_stream<
     id: &MachineID,
     mut stream: TcpStream,
     worker: Arc<Worker<T, V>>,
-    _type: X,
+    data_store: Arc<DataStore<T, V>>,
+    _type: &X,
     dummy_rpc_len: usize,
 ) {
     // construct the buffer to receive fixed size of bytes for RPC
@@ -267,14 +282,15 @@ async fn handle_rpc_receiving_stream<
 
                 // construct variable to pass into the new thread, for non-blocking circular/recursive remote calls
                 let worker_clone = worker.clone();
+                let data_store_clone = data_store.clone();
                 let _type_clone = _type.clone();
                 let id_clone = id.clone();
 
                 tokio::spawn(async move {
                     // calculate the result non-blocking-ly, without holding onto locks prior to entrance
-                    let res = worker_clone
+                    let res = data_store_clone
                         .get_vertex_by_id(&v_id)
-                        .apply_function(&_type_clone, &worker_clone, aux_info)
+                        .apply_function(&_type_clone, &data_store_clone, aux_info)
                         .await;
 
                     // get sending_stream as mut

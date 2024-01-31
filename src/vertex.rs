@@ -1,19 +1,20 @@
 /* vertex.rs
+
    Contains all the vertex related structs and functions, an layer on top of Vanilla Data
 
    Author: Binghong(Leo) Li
-   Creation Date: 1/14/2023
+   Creation Date: 1/14/2024
 */
+use crate::datastore::DataStore;
+use crate::{rpc, worker::Worker, UserDefinedFunction};
 
 use hashbrown::HashSet;
 use serde::{de::DeserializeOwned, Serialize};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
-use tokio_condvar::Condvar;
 use uuid::Uuid;
-
-use crate::{rpc, worker::Worker, UserDefinedFunction};
 
 /* *********** Type Aliases *********** */
 pub type VertexID = u32;
@@ -33,21 +34,21 @@ pub struct Data<T: DeserializeOwned>(pub T);
         2)  remote:     remote reference of vertex that lives on another machine/core/node
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
-pub enum VertexType<T: DeserializeOwned + Serialize> {
-    Local(LocalVertex<T>),
-    Remote(RemoteVertex),
-    Borrowed(LocalVertex<T>),
+pub enum VertexType<T: DeserializeOwned + Serialize, V> {
+    Local(LocalVertex<T, V>),
+    Remote(RemoteVertex<T, V>),
+    Borrowed(LocalVertex<T, V>),
     // Note: maybe a (Leased) variant for the future?
 }
 
 /*
    Vertex
 */
-pub struct Vertex<T: DeserializeOwned + Serialize> {
+pub struct Vertex<T: DeserializeOwned + Serialize, V> {
     pub id: VertexID,
-    pub v_type: VertexType<T>,
+    pub v_type: VertexType<T, V>,
 }
-impl<T: DeserializeOwned + Serialize> Vertex<T> {
+impl<T: DeserializeOwned + Serialize, V> Vertex<T, V> {
     /*
         User-Defined_Function Invoker
 
@@ -57,21 +58,20 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
     pub async fn apply_function<
         F: UserDefinedFunction<T, U, V>,
         U: Serialize + DeserializeOwned,
-        V,
     >(
         &self,
         udf: &F,
-        worker: &Worker<T, V>,
+        data_store: &DataStore<T, V>,
         auxiliary_information: U,
     ) -> V {
         match &self.v_type {
             VertexType::Local(_) | VertexType::Borrowed(_) => {
-                udf.execute(&self, worker, auxiliary_information).await
+                udf.execute(&self, data_store, auxiliary_information).await
             }
             VertexType::Remote(remote_vertex) => {
                 // Delegate to the remote machine: rpc here
                 remote_vertex
-                    .remote_execute(self.id, worker, auxiliary_information)
+                    .remote_execute(self.id, auxiliary_information)
                     .await
             }
         }
@@ -133,17 +133,16 @@ impl<T: DeserializeOwned + Serialize> Vertex<T> {
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
-pub struct LocalVertex<T: DeserializeOwned> {
+pub struct LocalVertex<T: DeserializeOwned + Serialize, V> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     edges: HashSet<VertexID>,          // for simulating general graphs
     data: Option<Data<T>>, // Using option to return the previous value (for error checking, etc.)
     borrowed_in: bool,     // When a node is a borrowed node
     leased_out: bool,      // When the current node is lent out
-    vertices_being_written: Arc<Mutex<hashbrown::HashSet<VertexID>>>,
-    vbw_cv: Arc<Condvar>,
+    worker: Arc<Worker<T, V>>,
 }
-impl<T: DeserializeOwned> LocalVertex<T> {
+impl<T: DeserializeOwned + Serialize, V> LocalVertex<T, V> {
     /*
        Constructor
     */
@@ -152,8 +151,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
         outgoing: HashSet<VertexID>,
         edges: HashSet<VertexID>,
         data: Option<Data<T>>,
-        vertices_being_written: Arc<Mutex<HashSet<VertexID>>>,
-        vbw_cv: Arc<Condvar>,
+        worker: Arc<Worker<T, V>>,
     ) -> Self {
         LocalVertex {
             incoming_edges: incoming,
@@ -162,8 +160,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
             data,
             borrowed_in: false,
             leased_out: false,
-            vertices_being_written,
-            vbw_cv,
+            worker,
         }
     }
 
@@ -175,8 +172,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
         incoming: &[VertexID],
         outgoing: &[VertexID],
         data: Data<T>,
-        vertices_being_written: Arc<Mutex<hashbrown::HashSet<VertexID>>>,
-        vbw_cv: Arc<Condvar>,
+        worker: Arc<Worker<T, V>>,
     ) -> Self {
         LocalVertex::new(
             incoming.iter().cloned().collect(),
@@ -187,8 +183,7 @@ impl<T: DeserializeOwned> LocalVertex<T> {
                 .cloned()
                 .collect(),
             Some(data),
-            vertices_being_written,
-            vbw_cv,
+            worker,
         )
     }
 
@@ -214,11 +209,11 @@ impl<T: DeserializeOwned> LocalVertex<T> {
         } else {
             let old_val;
             let mut vertices_being_written: MutexGuard<HashSet<VertexID>> =
-                self.vertices_being_written.lock().await;
+                self.worker.vertices_being_written.lock().await;
 
             // Note: The CondVar is not "Cancellation Safe", yet CondVar would be the most appropriate construct here
             while vertices_being_written.contains(&self_id) {
-                vertices_being_written = self.vbw_cv.wait(vertices_being_written).await;
+                vertices_being_written = self.worker.vbw_cv.wait(vertices_being_written).await;
             }
 
             vertices_being_written.insert(self_id);
@@ -234,37 +229,41 @@ impl<T: DeserializeOwned> LocalVertex<T> {
 
             // let others know I am done
             let mut vertices_being_written: MutexGuard<HashSet<VertexID>> =
-                self.vertices_being_written.lock().await;
+                self.worker.vertices_being_written.lock().await;
             vertices_being_written.remove(&self_id);
-            self.vbw_cv.notify_one();
+            self.worker.vbw_cv.notify_one();
 
             old_val
         }
     }
 }
 
+pub struct RemoteVertex<T: DeserializeOwned + Serialize, V> {
+    location: MachineID,
+    worker: Arc<Worker<T, V>>,
+    _marker: PhantomData<T>,
+}
 /*
    Remote References to other vertices
 */
-#[derive(Serialize)]
-pub struct RemoteVertex {
-    location: MachineID,
-}
-impl RemoteVertex {
+impl<T: DeserializeOwned + Serialize, V> RemoteVertex<T, V> {
     /*
        Constructor
     */
-    pub fn new(location: MachineID) -> Self {
-        Self { location }
+    pub fn new(location: MachineID, worker: Arc<Worker<T, V>>) -> Self {
+        Self {
+            location,
+            worker,
+            _marker: PhantomData,
+        }
     }
 
     /*
        RPC for execute
     */
-    async fn remote_execute<T, U: Serialize + DeserializeOwned, V>(
+    async fn remote_execute<U: Serialize + DeserializeOwned>(
         &self,
         vertex_id: VertexID,
-        worker: &Worker<T, V>,
         auxiliary_information: U,
     ) -> V
     where
@@ -277,7 +276,7 @@ impl RemoteVertex {
         let id = Uuid::new_v4();
 
         // Step 2: Add id to the worker's (id -> sending channel) mapping
-        worker
+        self.worker
             .result_multiplexing_channels
             .write()
             .await
@@ -285,7 +284,7 @@ impl RemoteVertex {
 
         // Step 3: get lock on the sending stream so that all messages are sent in order, as expected
         //      (using the same rpc stream, send command and the data if necessary)
-        let rpc_sending_streams = worker.rpc_sending_streams.read().await;
+        let rpc_sending_streams = self.worker.rpc_sending_streams.read().await;
         let mut rpc_sending_stream = rpc_sending_streams
             .get(&self.location)
             .unwrap()

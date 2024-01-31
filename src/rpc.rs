@@ -1,14 +1,15 @@
 /* rpc.rs
+
    Contains all the RPC related structs, defines the communication between nodes
 
    Author: Binghong(Leo) Li
-   Creation Date: 1/14/2023
+   Creation Date: 1/14/2024
 */
+
+use crate::vertex::{Data, MachineID, VertexID};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::vertex::{Data, MachineID, Vertex, VertexID};
 
 /*
     The initial RPC Communication
