@@ -280,14 +280,20 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
             min_id,
         } = &res;
 
-        data_store
-            .get_vertex_by_id(max_id)
-            .update(min_val.clone())
-            .await;
-        data_store
-            .get_vertex_by_id(min_id)
-            .update(max_val.clone())
-            .await;
+        println!(
+            "update1: {:?}",
+            data_store
+                .get_vertex_by_id(max_id)
+                .update(min_val.clone())
+                .await
+        );
+        println!(
+            "update2: {:?}",
+            data_store
+                .get_vertex_by_id(min_id)
+                .update(max_val.clone())
+                .await
+        );
 
         return res;
     }

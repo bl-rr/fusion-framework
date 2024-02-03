@@ -7,7 +7,7 @@
    Creation Date: 1/14/2024
 */
 
-use core::fmt;
+use core::fmt::Debug;
 
 use crate::datastore::DataStore;
 use crate::vertex::Vertex;
@@ -27,9 +27,9 @@ pub mod worker;
 */
 #[async_trait]
 pub trait UserDefinedFunction<
-    T: DeserializeOwned + Serialize + fmt::Debug + Default,
+    T: DeserializeOwned + Serialize + Debug + Default,
     U: DeserializeOwned + Serialize,
-    V,
+    V: Debug,
 >: Clone
 {
     async fn execute(

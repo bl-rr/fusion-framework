@@ -1,16 +1,16 @@
 /* vertex.rs
 
-   Contains all the vertex related structs and functions, an layer on top of Vanilla Data
+   Contains all the vertex related structs and functions, a layer on top of Vanilla Data
 
    Author: Binghong(Leo) Li
    Creation Date: 1/14/2024
 */
-use core::fmt;
+use core::fmt::{self, Debug};
 
 use crate::datastore::DataStore;
-use crate::{rpc, worker::Worker, UserDefinedFunction};
+use crate::{worker::Worker, UserDefinedFunction};
 
-use crate::rpc::RPC;
+use crate::rpc::{RPCResPayload, RPC};
 use hashbrown::HashSet;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::marker::PhantomData;
@@ -38,7 +38,7 @@ pub struct Data<T: Default>(pub T);
         3)  borrowed:   brought to local, original copy resides in remote (protected when leased?)
 */
 #[derive(Debug)]
-pub enum VertexType<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
+pub enum VertexType<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> {
     Local(LocalVertex<T, V>),
     Remote(RemoteVertex<T, V>),
     Borrowed(LocalVertex<T, V>),
@@ -49,11 +49,11 @@ pub enum VertexType<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
    Vertex
 */
 #[derive(Debug)]
-pub struct Vertex<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
+pub struct Vertex<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> {
     pub id: VertexID,
     pub v_type: VertexType<T, V>,
 }
-impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> Vertex<T, V> {
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
     /*
         User-Defined_Function Invoker
 
@@ -118,6 +118,8 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> Vertex<T, V> {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.get_data(),
             VertexType::Remote(_) => {
                 // this should never be reached
+
+                // sure one could do this, but you really shouldn't
                 panic!("Remote Node should not invoke get_val() function")
             }
         }
@@ -129,8 +131,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> Vertex<T, V> {
             }
             VertexType::Remote(remote_v) => {
                 // TODO: add some meaningful return later
-                remote_v.remote_update(data, self.id).await;
-                Some(Data::default())
+                remote_v.remote_update(data, self.id).await
             }
         }
     }
@@ -139,7 +140,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> Vertex<T, V> {
 /*
    Vertex that resides locally, or borrowed to be temporarily locally
 */
-pub struct LocalVertex<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> {
+pub struct LocalVertex<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> {
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     edges: HashSet<VertexID>,          // for simulating general graphs
@@ -149,7 +150,7 @@ pub struct LocalVertex<T: DeserializeOwned + Serialize + fmt::Debug + Default, V
     worker: Arc<Worker<T, V>>,
 }
 
-impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> fmt::Debug for LocalVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Debug for LocalVertex<T, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalVertex")
             .field("incoming_edges", &self.incoming_edges)
@@ -160,7 +161,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> fmt::Debug for L
     }
 }
 
-impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> LocalVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T, V> {
     /*
        Constructor
     */
@@ -256,13 +257,13 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> LocalVertex<T, V
     }
 }
 
-pub struct RemoteVertex<T: DeserializeOwned + Serialize + fmt::Debug, V> {
+pub struct RemoteVertex<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> {
     location: MachineID,
     worker: Arc<Worker<T, V>>,
     _marker: PhantomData<T>,
 }
 
-impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for RemoteVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Debug for RemoteVertex<T, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteVertex")
             .field("location", &self.location)
@@ -272,7 +273,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug, V> fmt::Debug for RemoteVerte
 /*
    Remote References to other vertices
 */
-impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> RemoteVertex<T, V> {
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> RemoteVertex<T, V> {
     /*
        Constructor
     */
@@ -297,7 +298,7 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> RemoteVertex<T, 
         // The remote machine executes the function and returns the result.
 
         // Step 1: Construct channels and id
-        let (tx, mut rx) = mpsc::channel::<V>(1000);
+        let (tx, mut rx) = mpsc::channel::<RPCResPayload<_, V>>(1000);
         let id = Uuid::new_v4();
 
         // Step 2: Add id to the worker's (id -> sending channel) mapping
@@ -333,16 +334,24 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> RemoteVertex<T, 
 
         // Step 7: Wait on the receiver and return result
         let rpc_result = rx.recv().await.unwrap();
-        rpc_result
+        return match rpc_result {
+            RPCResPayload::ExecuteResPayload(res) => res,
+            other => {
+                panic!(
+                    "received other rpc payload than execute response: {:?}",
+                    other
+                )
+            }
+        };
     }
 
     /*
        RPC for update
     */
     // Note: maybe refactor later for DRY principle
-    async fn remote_update(&self, data: Data<T>, v_id: VertexID) {
+    async fn remote_update(&self, data: Data<T>, v_id: VertexID) -> Option<Data<T>> {
         // Step 1: Construct channels and id
-        let (tx, mut rx) = mpsc::channel::<V>(1000);
+        let (tx, mut rx) = mpsc::channel::<RPCResPayload<T, _>>(1000);
         let id = Uuid::new_v4();
 
         // Step 2: Add id to the worker's (id -> sending channel) mapping
@@ -378,6 +387,15 @@ impl<T: DeserializeOwned + Serialize + fmt::Debug + Default, V> RemoteVertex<T, 
 
         // Step 7: Wait on the receiver and return result
         let rpc_result = rx.recv().await.unwrap();
+        return match rpc_result {
+            RPCResPayload::UpdateResPayload(res) => res,
+            other => {
+                panic!(
+                    "received other rpc payload than update response: {:?}",
+                    other
+                )
+            }
+        };
     }
 }
 

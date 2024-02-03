@@ -6,6 +6,8 @@
    Creation Date: 1/14/2024
 */
 
+use core::fmt::Debug;
+
 use crate::vertex::{Data, MachineID, VertexID};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -46,15 +48,22 @@ pub struct RPCData<T: Serialize + DeserializeOwned + Default> {
 
 // communication/session control
 #[derive(Serialize, Deserialize)]
-pub struct SessionHeader {
+pub struct RPCResponseHeader {
     pub session_id: Uuid,
-    pub session_type: DataType,
+    pub session_type: ResType,
     pub data_len: usize,
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum DataType {
-    RPCDataResult, // conveys data
-    UpdateRes,     // Ack
-    NotYetNeeded,  // Note: for later use
+pub enum ResType {
+    ExecuteRes,   // conveys data
+    UpdateRes,    // Ack
+    NotYetNeeded, // Note: for later use
+}
+
+//
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RPCResPayload<T: Default, V: Debug> {
+    ExecuteResPayload(V),
+    UpdateResPayload(Option<Data<T>>),
 }

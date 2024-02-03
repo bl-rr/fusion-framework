@@ -6,16 +6,16 @@
    Creation Date: 1/14/2024
 */
 
-use core::fmt;
+use core::fmt::Debug;
 
 use fusion_framework::datastore::{build_graph_integer_data, DataStore};
-use fusion_framework::rpc::{DataType, SessionHeader, RPC};
+use fusion_framework::rpc::{RPCResPayload, RPCResponseHeader, ResType, RPC};
 use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum, SwapLargestAndSmallest};
 use fusion_framework::vertex::{Data, MachineID};
 use fusion_framework::worker::Worker;
 use fusion_framework::UserDefinedFunction;
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
@@ -26,8 +26,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 async fn handle_data_receiving_stream<
-    T: Serialize + DeserializeOwned,
-    V: DeserializeOwned + Default,
+    T: Serialize + DeserializeOwned + Default,
+    V: DeserializeOwned + Default + Debug,
 >(
     mut data_receiving_stream: TcpStream,
     worker: Arc<Worker<T, V>>,
@@ -41,19 +41,20 @@ async fn handle_data_receiving_stream<
         .read_exact(&mut session_header_bytes)
         .await
     {
-        let session_header = bincode::deserialize::<SessionHeader>(&session_header_bytes).unwrap();
+        let session_header =
+            bincode::deserialize::<RPCResponseHeader>(&session_header_bytes).unwrap();
 
-        // depending the type, do different things
+        // depending on the type, do different things
         match &session_header.session_type {
-            DataType::NotYetNeeded => {
+            ResType::NotYetNeeded => {
                 unimplemented!()
             }
-            DataType::RPCDataResult => {
+            ResType::ExecuteRes | ResType::UpdateRes => {
                 // get where the channel the result should go to
                 let res_channels = worker.result_multiplexing_channels.read().await;
                 let res_channel = res_channels
                     .get(&session_header.session_id)
-                    .expect("session id not exist in aux_info channel")
+                    .expect("session id not exist in result channel")
                     .lock()
                     .await;
 
@@ -65,30 +66,18 @@ async fn handle_data_receiving_stream<
                     .unwrap();
 
                 // send over the result
-                let res = bincode::deserialize::<V>(&res_bytes).unwrap();
+                let res = bincode::deserialize::<RPCResPayload<_, _>>(&res_bytes).unwrap();
                 res_channel.send(res).await.unwrap();
-            }
-            DataType::UpdateRes => {
-                // get where the channel the result should go to
-                let res_channels = worker.result_multiplexing_channels.read().await;
-                let res_channel = res_channels
-                    .get(&session_header.session_id)
-                    .expect("session id not exist in aux_info channel")
-                    .lock()
-                    .await;
-
-                // TODO: Maybe optimize here later
-                res_channel.send(V::default()).await.unwrap();
             }
         }
     }
 }
 
 async fn handle_rpc_receiving_stream<
-    T: Serialize + DeserializeOwned + Send + Sync + 'static + fmt::Debug + Default,
+    T: Serialize + DeserializeOwned + Send + Sync + 'static + Debug + Default,
     U: Serialize + DeserializeOwned + Send + Sync + 'static,
     X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
-    V: Serialize + Send + Sync + 'static,
+    V: Serialize + Send + Sync + 'static + Debug,
 >(
     id: &MachineID,
     mut stream: TcpStream,
@@ -118,25 +107,27 @@ async fn handle_rpc_receiving_stream<
                 let id_clone = id.clone();
 
                 tokio::spawn(async move {
-                    // calculate the result non-blocking-ly, without holding onto locks prior to entrance
+                    // calculate the result in a non-blocking manner, without holding onto locks prior to entrance
                     let res = data_store_clone
                         .get_vertex_by_id(&v_id)
                         .apply_function(&_type_clone, &data_store_clone, aux_info)
                         .await;
 
+                    // construct result that is to be sent back
+                    let res: RPCResPayload<T, V> = RPCResPayload::ExecuteResPayload(res);
+
                     // get sending_stream as mut
                     let sending_streams = worker_clone.sending_streams.read().await;
                     let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
 
-                    let res_bytes = bincode::serialize::<V>(&res).unwrap();
+                    let res_bytes = bincode::serialize::<RPCResPayload<_, V>>(&res).unwrap();
 
                     // construct session header
-                    let session_header_for_result = SessionHeader {
+                    let session_header_for_result = RPCResponseHeader {
                         session_id: uuid,
-                        session_type: DataType::RPCDataResult,
+                        session_type: ResType::ExecuteRes,
                         data_len: res_bytes.len(),
                     };
-
                     let session_header_for_result_bytes =
                         bincode::serialize(&session_header_for_result).unwrap();
 
@@ -165,19 +156,24 @@ async fn handle_rpc_receiving_stream<
                 let data = bincode::deserialize::<Data<T>>(&data)
                     .expect("Incorrect Auxiliary Info Format");
 
-                // Note: Different here, doesn't need to multi-thread here, as update is pure local
-                // calculate the result non-blocking-ly, without holding onto locks prior to entrance
+                // Note: Different here, doesn't need to multi-thread here, as update is pure local (synchronous in
+                // another sense
+
                 let res = data_store.get_vertex_by_id(&v_id).update(data).await;
+
+                // construct the payload to be sent
+                let res: RPCResPayload<T, V> = RPCResPayload::UpdateResPayload(res);
+                let res_bytes = bincode::serialize::<RPCResPayload<T, _>>(&res).unwrap();
 
                 // get sending_stream as mut
                 let sending_streams = worker.sending_streams.read().await;
                 let mut sending_stream = sending_streams.get(id).unwrap().lock().await;
 
                 // construct session header
-                let session_header_for_result = SessionHeader {
+                let session_header_for_result = RPCResponseHeader {
                     session_id: uuid,
-                    session_type: DataType::UpdateRes,
-                    data_len: 0,
+                    session_type: ResType::UpdateRes,
+                    data_len: res_bytes.len(),
                 };
 
                 let session_header_for_result_bytes =
@@ -185,7 +181,7 @@ async fn handle_rpc_receiving_stream<
 
                 // send all the data
                 sending_stream
-                    .write_all(&session_header_for_result_bytes)
+                    .write_all(&[session_header_for_result_bytes, res_bytes].concat())
                     .await
                     .unwrap();
             }
@@ -304,12 +300,12 @@ async fn main() {
 
     println!("Simulation Set Up Complete: Communication channels");
 
-    // constructing graph for multi-thread sharing
+    // constructing datastructures for multi-thread sharing
     let worker = Arc::new(worker);
-    let mut data_store = DataStore::default();
+    let mut data_store = DataStore::new(worker.clone());
 
     // use graph builder to build the graph based on machine_id
-    build_graph_integer_data(&mut data_store, machine_id, worker.clone());
+    build_graph_integer_data(&mut data_store, machine_id, worker.clone()).await;
     println!("Graph built for testing");
 
     let data_store = Arc::new(data_store);
@@ -330,7 +326,7 @@ async fn main() {
             //     worker,
             //     data_store,
             //     &NaiveMaxAdjacentSum,
-            //     dummy_rpc_len,
+            //     dummy_rpc_len
             // )
             handle_rpc_receiving_stream(
                 &id,
@@ -345,9 +341,9 @@ async fn main() {
     }
 
     // getting fixed size for reception
-    let dummy_session_control_data_len = bincode::serialize(&SessionHeader {
+    let dummy_session_control_data_len = bincode::serialize(&RPCResponseHeader {
         session_id: Uuid::default(),
-        session_type: DataType::RPCDataResult,
+        session_type: ResType::ExecuteRes,
         data_len: 0,
     })
     .unwrap()
@@ -367,7 +363,7 @@ async fn main() {
     if machine_id == 1 {
         // Apply function and print result
         let root = data_store.get_vertex_by_id(&0);
-        let distance = 2;
+        let _distance = 2;
         // let result = root.apply_function(&GraphSum, &data_store, None).await;
         // let result = root
         //     .apply_function(
@@ -375,7 +371,7 @@ async fn main() {
         //         &data_store,
         //         Some(NMASInfo {
         //             source: None,
-        //             distance,
+        //             _distance,
         //             started: Some(HashSet::new()),
         //         }),
         //     )
