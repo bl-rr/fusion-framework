@@ -12,8 +12,6 @@ use crate::datastore::DataStore;
 use crate::rpc::{RPCResPayload, RPC};
 use crate::{worker::Worker, UserDefinedFunction};
 
-use async_dropper::AsyncDrop;
-use async_trait::async_trait;
 use hashbrown::hash_map::Entry;
 use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -166,7 +164,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Debug for Loca
             .field("incoming_edges", &self.incoming_edges)
             .field("outgoing_edges", &self.outgoing_edges)
             .field("edges", &self.edges)
-            .field("data", &self.data)
+            .field("data", unsafe { &*self.data.0.get() })
             .field("accessor", &self.vertex_lock)
             .finish()
     }
@@ -235,8 +233,8 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
         *accessor.reading.entry(thread::current().id()).or_insert(0) += 1;
 
         SafeDataReference {
-            data: unsafe { &*self.data.0.get() },
-            parent: self,
+            data: Some(unsafe { &*self.data.0.get() }),
+            parent: Some(self),
         }
     }
     pub async fn set_data(&self, data: Data<T>) -> Option<Data<T>> {
@@ -453,8 +451,8 @@ impl<T> MyUnsafeCell<T> {
 }
 
 pub struct SafeDataReference<'a, 'b, T: DeserializeOwned + Serialize + Debug + Default, V: Debug> {
-    pub data: &'a Option<Data<T>>,
-    parent: &'b LocalVertex<T, V>,
+    data: Option<&'a Option<Data<T>>>,
+    parent: Option<&'b LocalVertex<T, V>>,
 }
 
 // Implement the Deref trait for MyType
@@ -465,18 +463,33 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Deref
 
     // Implement the dereference function
     fn deref(&self) -> &Self::Target {
-        &self.data // Return a reference to the inner value
+        &self.data.unwrap() // Return a reference to the inner value
     }
 }
 
-// TODO: Sadly this is not automatically called, will have to implement myself...
-#[async_trait]
-impl<T: DeserializeOwned + Serialize + Debug + Default + Send + Sync, V: Debug + Send + Sync>
-    AsyncDrop for SafeDataReference<'_, '_, T, V>
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Drop
+    for SafeDataReference<'_, '_, T, V>
 {
+    fn drop(&mut self) {
+        futures::executor::block_on(self.async_drop());
+    }
+}
+
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Default
+    for SafeDataReference<'_, '_, T, V>
+{
+    fn default() -> Self {
+        Self {
+            data: None,
+            parent: None,
+        }
+    }
+}
+
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> SafeDataReference<'_, '_, T, V> {
     async fn async_drop(&mut self) {
         println!("dropping!");
-        let mut accessor = self.parent.vertex_lock.lock().await;
+        let mut accessor = self.parent.unwrap().vertex_lock.lock().await;
         match accessor.reading.entry(thread::current().id()) {
             Entry::Occupied(entry) => {
                 if *entry.get() <= 1 {
@@ -498,7 +511,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default + Send + Sync, V: Debug +
             }
         };
         println!("Nice dropping!");
-        self.parent.vertex_lock_cv.notify_all();
+        self.parent.unwrap().vertex_lock_cv.notify_all();
     }
 }
 

@@ -15,7 +15,7 @@ use fusion_framework::vertex::{Data, MachineID};
 use fusion_framework::worker::Worker;
 use fusion_framework::UserDefinedFunction;
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
@@ -320,23 +320,26 @@ async fn main() {
         tokio::spawn(async move {
             // handle_rpc_receiving_stream(&id, stream, worker, data_store, &GraphSum, dummy_rpc_len)
             //     .await;
-            // handle_rpc_receiving_stream(
-            //     &id,
-            //     stream,
-            //     worker,
-            //     data_store,
-            //     &NaiveMaxAdjacentSum,
-            //     dummy_rpc_len
-            // )
+
             handle_rpc_receiving_stream(
                 &id,
                 stream,
                 worker,
                 data_store,
-                &SwapLargestAndSmallest,
+                &NaiveMaxAdjacentSum,
                 dummy_rpc_len,
             )
             .await;
+
+            //     handle_rpc_receiving_stream(
+            //         &id,
+            //         stream,
+            //         worker,
+            //         data_store,
+            //         &SwapLargestAndSmallest,
+            //         dummy_rpc_len,
+            //     )
+            //     .await;
         });
     }
 
@@ -365,21 +368,22 @@ async fn main() {
         let root = data_store.get_vertex_by_id(&0);
         let _distance = 2;
         // let result = root.apply_function(&GraphSum, &data_store, None).await;
-        // let result = root
-        //     .apply_function(
-        //         &NaiveMaxAdjacentSum,
-        //         &data_store,
-        //         Some(NMASInfo {
-        //             source: None,
-        //             _distance,
-        //             started: Some(HashSet::new()),
-        //         }),
-        //     )
-        //     .await;
+
         let result = root
-            .apply_function(&SwapLargestAndSmallest, &data_store, true)
+            .apply_function(
+                &NaiveMaxAdjacentSum,
+                &data_store,
+                Some(NMASInfo {
+                    source: None,
+                    distance: _distance,
+                    started: Some(HashSet::new()),
+                }),
+            )
             .await;
-        // let result = root.apply_function(&GraphSum, &data_store, None).await;
+
+        // let result = root
+        //     .apply_function(&SwapLargestAndSmallest, &data_store, true)
+        //     .await;
 
         // println!("The graph sum is: {result}");
         // println!("The Max Adjacent Sum for {distance} is: {result}");

@@ -14,7 +14,6 @@ use crate::datastore::DataStore;
 use crate::vertex::*;
 use crate::UserDefinedFunction;
 
-use async_dropper::AsyncDrop;
 use async_trait::async_trait;
 use hashbrown::HashSet;
 use serde::de::DeserializeOwned;
@@ -231,7 +230,7 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
         data_store: &DataStore<isize, SLASInfo>,
         aux_info: bool,
     ) -> SLASInfo {
-        let mut val = vertex.get_val().await;
+        let val = vertex.get_val().await;
         println!("\n{:?}\n", vertex);
 
         if vertex.children().is_empty() {
@@ -270,7 +269,6 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
             }
         }
 
-        val.async_drop().await;
         println!("\n{:?}\n", vertex);
 
         // not the root
