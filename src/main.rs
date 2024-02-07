@@ -23,6 +23,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 async fn handle_data_receiving_stream<
@@ -79,8 +80,8 @@ async fn handle_rpc_receiving_stream<
     X: UserDefinedFunction<T, U, V> + Send + Sync + 'static + Clone,
     V: Serialize + Send + Sync + 'static + Debug,
 >(
-    id: &MachineID,
-    mut stream: TcpStream,
+    id: Arc<MachineID>,
+    stream: Arc<Mutex<TcpStream>>,
     worker: Arc<Worker<T, V>>,
     data_store: Arc<DataStore<T, V>>,
     _type: &X,
@@ -88,6 +89,8 @@ async fn handle_rpc_receiving_stream<
 ) {
     // construct the buffer to receive fixed size of bytes for RPC
     let mut cmd = vec![0u8; dummy_rpc_len];
+
+    let mut stream = stream.lock().await;
 
     while let Ok(_) = stream.read_exact(&mut cmd).await {
         match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
@@ -118,7 +121,8 @@ async fn handle_rpc_receiving_stream<
 
                     // get sending_stream as mut
                     let sending_streams = worker_clone.sending_streams.read().await;
-                    let mut sending_stream = sending_streams.get(&id_clone).unwrap().lock().await;
+                    let mut sending_stream =
+                        sending_streams.get(id_clone.as_ref()).unwrap().lock().await;
 
                     let res_bytes = bincode::serialize::<RPCResPayload<_, V>>(&res).unwrap();
 
@@ -167,7 +171,7 @@ async fn handle_rpc_receiving_stream<
 
                 // get sending_stream as mut
                 let sending_streams = worker.sending_streams.read().await;
-                let mut sending_stream = sending_streams.get(id).unwrap().lock().await;
+                let mut sending_stream = sending_streams.get(id.as_ref()).unwrap().lock().await;
 
                 // construct session header
                 let session_header_for_result = RPCResponseHeader {
@@ -245,7 +249,7 @@ async fn main() {
                 .expect(&*format!("Failed to connect to {remote_address}"));
 
             // fill in the data structures
-            rpc_receiving_streams.insert(2, rpc_receiving_stream);
+            rpc_receiving_streams.insert(Arc::new(2), Arc::new(Mutex::new(rpc_receiving_stream)));
             data_receiving_streams.push(incoming_stream);
             worker
                 .sending_streams
@@ -282,7 +286,7 @@ async fn main() {
             println!("New connection from {socket_addr}");
 
             // fill in the data structures
-            rpc_receiving_streams.insert(1, rpc_receiving_stream);
+            rpc_receiving_streams.insert(Arc::new(1), Arc::new(Mutex::new(rpc_receiving_stream)));
             data_receiving_streams.push(incoming_stream);
             worker
                 .sending_streams
@@ -302,46 +306,27 @@ async fn main() {
 
     // constructing datastructures for multi-thread sharing
     let worker = Arc::new(worker);
-    let mut data_store = DataStore::new(worker.clone());
+    let mut data_store = DataStore::new();
 
     // use graph builder to build the graph based on machine_id
     build_graph_integer_data(&mut data_store, machine_id, worker.clone());
     println!("Graph built for testing");
 
-    let data_store = Arc::new(data_store);
+    let mut data_store = Arc::new(data_store);
 
     // getting fixed size for reception
     let dummy_rpc = RPC::Execute(Uuid::default(), 0, 0);
     let dummy_rpc_len = bincode::serialize(&dummy_rpc).unwrap().len();
-    // handle rpc receiving streams
-    for (id, stream) in rpc_receiving_streams.into_iter() {
-        let worker = worker.clone();
-        let data_store = data_store.clone();
-        tokio::spawn(async move {
-            // handle_rpc_receiving_stream(&id, stream, worker, data_store, &GraphSum, dummy_rpc_len)
-            //     .await;
 
-            handle_rpc_receiving_stream(
-                &id,
-                stream,
-                worker,
-                data_store,
-                &NaiveMaxAdjacentSum,
-                dummy_rpc_len,
-            )
-            .await;
+    let mut data_store_holders = vec![];
 
-            //     handle_rpc_receiving_stream(
-            //         &id,
-            //         stream,
-            //         worker,
-            //         data_store,
-            //         &SwapLargestAndSmallest,
-            //         dummy_rpc_len,
-            //     )
-            //     .await;
-        });
-    }
+    start_receiving_rpcs(
+        &mut rpc_receiving_streams,
+        &worker,
+        &mut data_store,
+        dummy_rpc_len,
+        &mut data_store_holders,
+    );
 
     // getting fixed size for reception
     let dummy_session_control_data_len = bincode::serialize(&RPCResponseHeader {
@@ -367,34 +352,114 @@ async fn main() {
         // Apply function and print result
         let root = data_store.get_vertex_by_id(&0);
         let _distance = 2;
-        // let result = root.apply_function(&GraphSum, &data_store, None).await;
+        let result = root.apply_function(&GraphSum, &data_store, None).await;
+        println!("[1]: The graph sum is: {result}");
 
-        let result = root
-            .apply_function(
-                &NaiveMaxAdjacentSum,
-                &data_store,
-                Some(NMASInfo {
-                    source: None,
-                    distance: _distance,
-                    started: Some(HashSet::new()),
-                }),
-            )
-            .await;
+        // let result = root
+        //     .apply_function(
+        //         &NaiveMaxAdjacentSum,
+        //         &data_store,
+        //         Some(NMASInfo {
+        //             source: None,
+        //             distance: _distance,
+        //             started: Some(HashSet::new()),
+        //         }),
+        //     )
+        //     .await;
+        // println!("The Max Adjacent Sum for {distance} is: {result}");
 
         // let result = root
         //     .apply_function(&SwapLargestAndSmallest, &data_store, true)
         //     .await;
+        // println!("the result to swap largest and smallest is: {:?}", result);
 
-        // println!("The graph sum is: {result}");
-        // println!("The Max Adjacent Sum for {distance} is: {result}");
+        update_data_store(
+            &mut rpc_receiving_streams,
+            &worker,
+            &mut data_store,
+            dummy_rpc_len,
+            &mut data_store_holders,
+        )
+        .await;
 
-        println!("the result to swap largest and smallest is: {:?}", result);
+        let root = data_store.get_vertex_by_id(&0);
+        let _distance = 2;
+        let result = root.apply_function(&GraphSum, &data_store, None).await;
+        println!("[2]: The graph sum is: {result}");
     } else {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    println!("AFTER~\n{:?}", data_store);
+    // println!("AFTER~\n{:?}", data_store);
 
     // keeping the machine running
     loop {}
+}
+
+async fn update_data_store(
+    mut rpc_receiving_streams: &mut HashMap<Arc<MachineID>, Arc<Mutex<TcpStream>>>,
+    worker: &Arc<Worker<isize, isize>>,
+    mut data_store: &mut Arc<DataStore<isize, isize>>,
+    dummy_rpc_len: usize,
+    mut data_store_holders: &mut Vec<JoinHandle<()>>,
+) {
+    // kill all data_store_holders
+    for stream in data_store_holders.drain(..) {
+        stream.abort();
+        stream.await.unwrap_or_default();
+    }
+    {
+        println!("strong counts: {:?}", Arc::strong_count(&data_store));
+        let data_store_mut = Arc::get_mut(&mut data_store).unwrap();
+        data_store_mut.update().await;
+    }
+    start_receiving_rpcs(
+        &mut rpc_receiving_streams,
+        &worker,
+        &mut data_store,
+        dummy_rpc_len,
+        &mut data_store_holders,
+    );
+}
+
+fn start_receiving_rpcs(
+    rpc_receiving_streams: &mut HashMap<Arc<MachineID>, Arc<Mutex<TcpStream>>>,
+    worker: &Arc<Worker<isize, isize>>,
+    data_store: &mut Arc<DataStore<isize, isize>>,
+    dummy_rpc_len: usize,
+    data_store_holders: &mut Vec<JoinHandle<()>>,
+) {
+    // handle rpc receiving streams
+    for (id, stream) in rpc_receiving_streams.iter() {
+        let worker = worker.clone();
+        let data_store = data_store.clone();
+        let stream = stream.clone();
+        let id = id.clone();
+        let handle = tokio::spawn(async move {
+            handle_rpc_receiving_stream(id, stream, worker, data_store, &GraphSum, dummy_rpc_len)
+                .await;
+
+            // handle_rpc_receiving_stream(
+            //     id,
+            //     stream,
+            //     worker,
+            //     data_store,
+            //     &NaiveMaxAdjacentSum,
+            //     dummy_rpc_len,
+            // )
+            // .await;
+
+            //     handle_rpc_receiving_stream(
+            //         id,
+            //         stream,
+            //         worker,
+            //         data_store,
+            //         &SwapLargestAndSmallest,
+            //         dummy_rpc_len,
+            //     )
+            //     .await;
+        });
+
+        data_store_holders.push(handle);
+    }
 }

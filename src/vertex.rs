@@ -431,7 +431,7 @@ pub enum VertexKind {
 /*
    New as of 02/06/2024
 
-   Implementing the logic to return a reference who's lifetime is "checked" in runtim.
+   Implementing the logic to return a reference whose lifetime is "checked"/guaranteed in runtime.
 
 */
 

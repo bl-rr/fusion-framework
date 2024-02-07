@@ -18,10 +18,13 @@ use hashbrown::HashMap;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct DataStore<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> {
-    map: HashMap<VertexID, Vertex<T, V>>,
-    worker: Arc<Worker<T, V>>,
+    pub map: HashMap<VertexID, Vertex<T, V>>,
+    pub new_nodes: Mutex<Vec<Vertex<T, V>>>,
+    pub nodes_to_delete: Mutex<Vec<Vertex<T, V>>>,
+    pub next_id: VertexID,
 } // vertex_id -> vertex mapping
 
 impl<T, V> Debug for DataStore<T, V>
@@ -39,16 +42,19 @@ where
 }
 
 impl<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> DataStore<T, V> {
-    pub fn new(worker: Arc<Worker<T, V>>) -> Self {
+    pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            worker,
+            new_nodes: Default::default(),
+            nodes_to_delete: Default::default(),
+            next_id: 1,
         }
     }
     /*
        Adding an existing Vertex
     */
     pub fn add_vertex(&mut self, v_id: VertexID, vertex: Vertex<T, V>) {
+        self.next_id += 1;
         self.map.insert(v_id, vertex);
     }
 
@@ -97,6 +103,17 @@ impl<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> DataStore<T, V
     // Getter, assumes no error
     pub fn get_vertex_by_id(&self, v_id: &VertexID) -> &Vertex<T, V> {
         self.map.get(v_id).expect("node not found")
+    }
+
+    pub async fn update(&mut self) {
+        // TODO: Implement Actual update logic
+        let mut new_nodes = self.new_nodes.lock().await;
+
+        for new_node in new_nodes.drain(..) {
+            // todo
+            self.map.insert(self.next_id, new_node);
+            self.next_id += 1;
+        }
     }
 }
 
