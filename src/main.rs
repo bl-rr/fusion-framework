@@ -11,7 +11,7 @@ use core::fmt::Debug;
 use fusion_framework::datastore::{build_graph_integer_data, DataStore};
 use fusion_framework::rpc::{RPCResPayload, RPCResponseHeader, ResType, RPC};
 use fusion_framework::udf::{GraphSum, NMASInfo, NaiveMaxAdjacentSum, SwapLargestAndSmallest};
-use fusion_framework::vertex::{Data, MachineID};
+use fusion_framework::vertex::{Data, MachineID, VertexID};
 use fusion_framework::worker::Worker;
 use fusion_framework::UserDefinedFunction;
 
@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -86,6 +87,8 @@ async fn handle_rpc_receiving_stream<
     data_store: Arc<DataStore<T, V>>,
     _type: &X,
     dummy_rpc_len: usize,
+    tx_req: Sender<MachineID>,
+    tx_res: Sender<()>,
 ) {
     // construct the buffer to receive fixed size of bytes for RPC
     let mut cmd = vec![0u8; dummy_rpc_len];
@@ -189,6 +192,14 @@ async fn handle_rpc_receiving_stream<
                     .await
                     .unwrap();
             }
+            RPC::UpdateMap(_, _, _) => {
+                println!("received update request");
+                tx_req.send(id.as_ref().clone()).await.unwrap();
+            }
+            RPC::UpdateMapRes(_, _, _) => {
+                println!("received update resp");
+                tx_res.send(()).await.unwrap()
+            }
         }
     }
 }
@@ -223,6 +234,9 @@ async fn main() {
 
     // Create new worker instance
     let worker = Worker::new();
+    // other communication channel
+    let (tx_update_req, mut rx_update_req) = channel::<MachineID>(100);
+    let (tx_update_res, mut rx_update_res) = channel::<()>(100);
 
     match machine_id {
         // the order of communication is crucial for initial setup
@@ -326,6 +340,8 @@ async fn main() {
         &mut data_store,
         dummy_rpc_len,
         &mut data_store_holders,
+        tx_update_req.clone(),
+        tx_update_res.clone(),
     );
 
     // getting fixed size for reception
@@ -373,8 +389,11 @@ async fn main() {
         //     .await;
         // println!("the result to swap largest and smallest is: {:?}", result);
 
-        update_data_store(
+        update_global_data_store(
             &mut rpc_receiving_streams,
+            &tx_update_req,
+            &tx_update_res,
+            &mut rx_update_res,
             &worker,
             &mut data_store,
             dummy_rpc_len,
@@ -390,10 +409,91 @@ async fn main() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    // println!("AFTER~\n{:?}", data_store);
-
     // keeping the machine running
-    loop {}
+    loop {
+        handle_update_reqs(
+            &mut rpc_receiving_streams,
+            tx_update_req.clone(),
+            &mut rx_update_req,
+            tx_update_res.clone(),
+            &worker,
+            &mut data_store,
+            dummy_rpc_len,
+            &mut data_store_holders,
+        )
+        .await;
+    }
+}
+
+async fn handle_update_reqs(
+    mut rpc_receiving_streams: &mut HashMap<Arc<MachineID>, Arc<Mutex<TcpStream>>>,
+    tx_update_req: Sender<MachineID>,
+    rx_update_req: &mut Receiver<MachineID>,
+    tx_update_res: Sender<()>,
+    worker: &Arc<Worker<isize, isize>>,
+    mut data_store: &mut Arc<DataStore<isize, isize>>,
+    dummy_rpc_len: usize,
+    mut data_store_holders: &mut Vec<JoinHandle<()>>,
+) {
+    if let Some(source_id) = rx_update_req.recv().await {
+        update_data_store(
+            &mut rpc_receiving_streams,
+            &worker,
+            &mut data_store,
+            dummy_rpc_len,
+            &mut data_store_holders,
+            tx_update_req.clone(),
+            tx_update_res.clone(),
+        )
+        .await;
+
+        let update_resp =
+            RPC::UpdateMapRes(Default::default(), Default::default(), Default::default());
+        let update_resp_bytes = bincode::serialize(&update_resp).unwrap();
+
+        let rpc_sending_streams = worker.rpc_sending_streams.read().await;
+        let mut stream = rpc_sending_streams.get(&source_id).unwrap().lock().await;
+        stream.write_all(&update_resp_bytes).await.unwrap();
+
+        println!("AFTER~\n{:?}", data_store);
+    }
+}
+
+async fn update_global_data_store(
+    mut rpc_receiving_streams: &mut HashMap<Arc<MachineID>, Arc<Mutex<TcpStream>>>,
+    tx_update_req: &Sender<MachineID>,
+    tx_update_res: &Sender<()>,
+    rx_update_res: &mut Receiver<()>,
+    worker: &Arc<Worker<isize, isize>>,
+    mut data_store: &mut Arc<DataStore<isize, isize>>,
+    dummy_rpc_len: usize,
+    mut data_store_holders: &mut Vec<JoinHandle<()>>,
+) {
+    update_data_store(
+        &mut rpc_receiving_streams,
+        &worker,
+        &mut data_store,
+        dummy_rpc_len,
+        &mut data_store_holders,
+        tx_update_req.clone(),
+        tx_update_res.clone(),
+    )
+    .await;
+    // need all others to update as well
+    let update_command = RPC::UpdateMap(Default::default(), Default::default(), Default::default());
+    let update_command_bytes = bincode::serialize(&update_command).unwrap();
+
+    let rpc_sending_streams = worker.rpc_sending_streams.read().await;
+    for (_, stream) in rpc_sending_streams.iter() {
+        let mut stream = stream.lock().await;
+        stream.write_all(&update_command_bytes).await.unwrap();
+    }
+
+    // Wait for response
+    for _ in 1..=rpc_sending_streams.len() {
+        rx_update_res.recv().await.unwrap();
+        println!("received");
+    }
 }
 
 async fn update_data_store(
@@ -402,6 +502,8 @@ async fn update_data_store(
     mut data_store: &mut Arc<DataStore<isize, isize>>,
     dummy_rpc_len: usize,
     mut data_store_holders: &mut Vec<JoinHandle<()>>,
+    tx_req: Sender<MachineID>,
+    tx_res: Sender<()>,
 ) {
     // kill all data_store_holders
     for stream in data_store_holders.drain(..) {
@@ -419,6 +521,8 @@ async fn update_data_store(
         &mut data_store,
         dummy_rpc_len,
         &mut data_store_holders,
+        tx_req,
+        tx_res,
     );
 }
 
@@ -428,6 +532,8 @@ fn start_receiving_rpcs(
     data_store: &mut Arc<DataStore<isize, isize>>,
     dummy_rpc_len: usize,
     data_store_holders: &mut Vec<JoinHandle<()>>,
+    tx_req: Sender<MachineID>,
+    tx_res: Sender<()>,
 ) {
     // handle rpc receiving streams
     for (id, stream) in rpc_receiving_streams.iter() {
@@ -435,9 +541,21 @@ fn start_receiving_rpcs(
         let data_store = data_store.clone();
         let stream = stream.clone();
         let id = id.clone();
+        let tx_req = tx_req.clone();
+        let tx_res = tx_res.clone();
+
         let handle = tokio::spawn(async move {
-            handle_rpc_receiving_stream(id, stream, worker, data_store, &GraphSum, dummy_rpc_len)
-                .await;
+            handle_rpc_receiving_stream(
+                id,
+                stream,
+                worker,
+                data_store,
+                &GraphSum,
+                dummy_rpc_len,
+                tx_req,
+                tx_res,
+            )
+            .await;
 
             // handle_rpc_receiving_stream(
             //     id,

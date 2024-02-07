@@ -46,6 +46,9 @@ impl UserDefinedFunction<isize, Option<u64>, isize> for GraphSum {
         data_store: &DataStore<isize, isize>,
         aux_info: Option<u64>,
     ) -> isize {
+        if vertex.children().is_empty() {
+            vertex.add_child(data_store, Data(10000)).await;
+        }
         let mut count = Data(0);
         count += (*vertex.get_val().await).as_ref().unwrap().0;
 

@@ -14,17 +14,18 @@ use crate::vertex::{
 };
 use crate::worker::Worker;
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct DataStore<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> {
-    pub map: HashMap<VertexID, Vertex<T, V>>,
-    pub new_nodes: Mutex<Vec<Vertex<T, V>>>,
-    pub nodes_to_delete: Mutex<Vec<Vertex<T, V>>>,
-    pub next_id: VertexID,
+    map: HashMap<VertexID, Vertex<T, V>>,
+    pub(crate) new_nodes: Mutex<Vec<Vertex<T, V>>>,
+    pub(crate) nodes_to_delete: Mutex<HashSet<VertexID>>,
+    pub(crate) next_id: AtomicU32,
 } // vertex_id -> vertex mapping
 
 impl<T, V> Debug for DataStore<T, V>
@@ -47,14 +48,14 @@ impl<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> DataStore<T, V
             map: HashMap::new(),
             new_nodes: Default::default(),
             nodes_to_delete: Default::default(),
-            next_id: 1,
+            next_id: AtomicU32::new(0),
         }
     }
     /*
        Adding an existing Vertex
     */
     pub fn add_vertex(&mut self, v_id: VertexID, vertex: Vertex<T, V>) {
-        self.next_id += 1;
+        self.next_id.fetch_add(1, Ordering::Relaxed);
         self.map.insert(v_id, vertex);
     }
 
@@ -108,13 +109,25 @@ impl<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> DataStore<T, V
     pub async fn update(&mut self) {
         // TODO: Implement Actual update logic
         let mut new_nodes = self.new_nodes.lock().await;
+        let mut nodes_to_delete = self.nodes_to_delete.lock().await;
 
         for new_node in new_nodes.drain(..) {
             // todo
-            self.map.insert(self.next_id, new_node);
-            self.next_id += 1;
+            let parent = self
+                .map
+                .get_mut(new_node.parents().iter().next().unwrap())
+                .unwrap();
+            parent.edges_mut().insert(new_node.id);
+            parent.children_mut().insert(new_node.id);
+
+            self.map.insert(new_node.id, new_node);
+            self.next_id.fetch_add(1, Ordering::Relaxed);
         }
+
+        for old_node in nodes_to_delete.drain() {}
     }
+
+    // perhaps provide interfaces for later on adding to the datastore during run-time.
 }
 
 // custom graph builder for testing based on machine_id (the 1,2 scenario), for now

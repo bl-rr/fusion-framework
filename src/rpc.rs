@@ -25,6 +25,8 @@ pub enum RPC {
     RequestData(Uuid, VertexID, usize),
     ExecuteWithData(Uuid, VertexID, usize),
     Update(Uuid, VertexID, usize),
+    UpdateMap(Uuid, VertexID, usize), // use usize to know where it came from
+    UpdateMapRes(Uuid, VertexID, usize) // filling 
 }
 
 /*

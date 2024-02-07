@@ -17,6 +17,7 @@ use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::thread::ThreadId;
@@ -101,6 +102,15 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
             }
         }
     }
+    pub fn children_mut(&mut self) -> &mut HashSet<VertexID> {
+        match &mut self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.children_mut(),
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke children() function")
+            }
+        }
+    }
     pub fn parents(&self) -> &HashSet<VertexID> {
         match &self.v_type {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.parents(),
@@ -110,9 +120,27 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
             }
         }
     }
+    pub fn parents_mut(&mut self) -> &mut HashSet<VertexID> {
+        match &mut self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.parents_mut(),
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke parents() function")
+            }
+        }
+    }
     pub fn edges(&self) -> &HashSet<VertexID> {
         match &self.v_type {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.edges(),
+            VertexType::Remote(_) => {
+                // this should never be reached
+                panic!("Remote Node should not invoke edges() function")
+            }
+        }
+    }
+    pub fn edges_mut(&mut self) -> &mut HashSet<VertexID> {
+        match &mut self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.edges_mut(),
             VertexType::Remote(_) => {
                 // this should never be reached
                 panic!("Remote Node should not invoke edges() function")
@@ -138,6 +166,28 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
             VertexType::Remote(remote_v) => {
                 // TODO: add some meaningful return later
                 remote_v.remote_update(data, self.id).await
+            }
+        }
+    }
+    pub async fn add_child(&self, data_store: &DataStore<T, V>, data: Data<T>) {
+        match &self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
+                local_v.add_child(data_store, self.id, data).await;
+            }
+            VertexType::Remote(_) => {
+                // TODO: add some meaningful return later
+                panic!("remote node should not call add_child")
+            }
+        }
+    }
+    pub async fn remove_self(&self, data_store: &DataStore<T, V>) {
+        match &self.v_type {
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
+                local_v.remove_self(data_store, self.id).await;
+            }
+            VertexType::Remote(_) => {
+                // TODO: add some meaningful return later
+                panic!("remote node should not call remove_self")
             }
         }
     }
@@ -214,11 +264,20 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
     pub fn children(&self) -> &HashSet<VertexID> {
         &self.outgoing_edges
     }
+    pub fn children_mut(&mut self) -> &mut HashSet<VertexID> {
+        &mut self.outgoing_edges
+    }
     pub fn parents(&self) -> &HashSet<VertexID> {
         &self.incoming_edges
     }
+    pub fn parents_mut(&mut self) -> &mut HashSet<VertexID> {
+        &mut self.incoming_edges
+    }
     pub fn edges(&self) -> &HashSet<VertexID> {
         &self.edges
+    }
+    pub fn edges_mut(&mut self) -> &mut HashSet<VertexID> {
+        &mut self.edges
     }
     pub async fn get_data(&self) -> SafeDataReference<T, V> {
         // this basically means that no one is writing
@@ -274,6 +333,27 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
 
             old_val
         }
+    }
+
+    pub async fn add_child(&self, data_store: &DataStore<T, V>, self_id: VertexID, data: Data<T>) {
+        data_store.new_nodes.lock().await.push(Vertex {
+            id: data_store.next_id.fetch_add(1, Ordering::Relaxed),
+            v_type: VertexType::Local(LocalVertex {
+                incoming_edges: HashSet::from([self_id]),
+                outgoing_edges: Default::default(),
+                edges: HashSet::from([self_id]),
+                data: Arc::new(MyUnsafeCell::new(Some(data))),
+                borrowed_in: false,
+                leased_out: false,
+                vertex_lock: Default::default(),
+                vertex_lock_cv: Default::default(),
+                _marker: Default::default(),
+            }),
+        })
+    }
+
+    pub async fn remove_self(&self, data_store: &DataStore<T, V>, self_id: VertexID) {
+        data_store.nodes_to_delete.lock().await.insert(self_id);
     }
 }
 
