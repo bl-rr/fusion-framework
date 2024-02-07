@@ -5,18 +5,26 @@
    Author: Binghong(Leo) Li
    Creation Date: 1/14/2024
 */
+use core::cell::UnsafeCell;
 use core::fmt::{self, Debug};
 
 use crate::datastore::DataStore;
+use crate::rpc::{RPCResPayload, RPC};
 use crate::{worker::Worker, UserDefinedFunction};
 
-use crate::rpc::{RPCResPayload, RPC};
-use hashbrown::HashSet;
+use async_dropper::AsyncDrop;
+use async_trait::async_trait;
+use hashbrown::hash_map::Entry;
+use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::sync::Arc;
+use std::thread;
+use std::thread::ThreadId;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, Mutex, MutexGuard};
+use tokio::sync::{mpsc, Mutex};
+use tokio_condvar::Condvar;
 use uuid::Uuid;
 
 /* *********** Type Aliases *********** */
@@ -113,9 +121,9 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
             }
         }
     }
-    pub fn get_val(&self) -> &Option<Data<T>> {
+    pub async fn get_val(&self) -> SafeDataReference<T, V> {
         match &self.v_type {
-            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.get_data(),
+            VertexType::Local(local_v) | VertexType::Borrowed(local_v) => local_v.get_data().await,
             VertexType::Remote(_) => {
                 // this should never be reached
 
@@ -127,7 +135,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
     pub async fn update(&self, data: Data<T>) -> Option<Data<T>> {
         match &self.v_type {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
-                local_v.set_data(data, self.id).await
+                local_v.set_data(data).await
             }
             VertexType::Remote(remote_v) => {
                 // TODO: add some meaningful return later
@@ -144,10 +152,12 @@ pub struct LocalVertex<T: DeserializeOwned + Serialize + Debug + Default, V: Deb
     incoming_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     outgoing_edges: HashSet<VertexID>, // for simulating trees, or DAGs
     edges: HashSet<VertexID>,          // for simulating general graphs
-    data: Option<Data<T>>, // Using option to return the previous value (for error checking, etc.)
-    borrowed_in: bool,     // When a node is a borrowed node
-    leased_out: bool,      // When the current node is lent out
-    worker: Arc<Worker<T, V>>,
+    data: Arc<MyUnsafeCell<Option<Data<T>>>>, // Using option to return the previous value (for error checking, etc.)
+    borrowed_in: bool,                        // When a node is a borrowed node
+    leased_out: bool,                         // When the current node is lent out
+    vertex_lock: Mutex<VertexAccessor>,
+    vertex_lock_cv: Condvar,
+    _marker: PhantomData<V>,
 }
 
 impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Debug for LocalVertex<T, V> {
@@ -157,6 +167,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Debug for Loca
             .field("outgoing_edges", &self.outgoing_edges)
             .field("edges", &self.edges)
             .field("data", &self.data)
+            .field("accessor", &self.vertex_lock)
             .finish()
     }
 }
@@ -170,16 +181,17 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
         outgoing: HashSet<VertexID>,
         edges: HashSet<VertexID>,
         data: Option<Data<T>>,
-        worker: Arc<Worker<T, V>>,
     ) -> Self {
         LocalVertex {
             incoming_edges: incoming,
             outgoing_edges: outgoing,
             edges,
-            data,
+            data: Arc::new(MyUnsafeCell::new(data)),
             borrowed_in: false,
             leased_out: false,
-            worker,
+            vertex_lock: Mutex::new(VertexAccessor::default()),
+            vertex_lock_cv: Condvar::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -187,12 +199,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
        Builder/Creator method for easier construction in graph constructors
        or in general when creating individual vertices
     */
-    pub fn create_vertex(
-        incoming: &[VertexID],
-        outgoing: &[VertexID],
-        data: Data<T>,
-        worker: Arc<Worker<T, V>>,
-    ) -> Self {
+    pub fn create_vertex(incoming: &[VertexID], outgoing: &[VertexID], data: Data<T>) -> Self {
         LocalVertex::new(
             incoming.iter().cloned().collect(),
             outgoing.iter().cloned().collect(),
@@ -202,7 +209,6 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
                 .cloned()
                 .collect(),
             Some(data),
-            worker,
         )
     }
 
@@ -216,41 +222,57 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
     pub fn edges(&self) -> &HashSet<VertexID> {
         &self.edges
     }
-    pub fn get_data(&self) -> &Option<Data<T>> {
-        &self.data
+    pub async fn get_data(&self) -> SafeDataReference<T, V> {
+        // this basically means that no one is writing
+        let mut accessor = self.vertex_lock.lock().await;
+
+        // now it's either free or read
+        if matches!(accessor.state, VertexState::Free) {
+            accessor.state = VertexState::Read;
+        }
+
+        // insert the current thread_id into the reading
+        *accessor.reading.entry(thread::current().id()).or_insert(0) += 1;
+
+        SafeDataReference {
+            data: unsafe { &*self.data.0.get() },
+            parent: self,
+        }
     }
-    pub fn get_data_mut(&mut self) -> &mut Option<Data<T>> {
-        &mut self.data
-    }
-    pub async fn set_data(&self, data: Data<T>, self_id: VertexID) -> Option<Data<T>> {
+    pub async fn set_data(&self, data: Data<T>) -> Option<Data<T>> {
         if self.leased_out {
             None
         } else {
             let old_val;
-            let mut vertices_being_written: MutexGuard<HashSet<VertexID>> =
-                self.worker.vertices_being_written.lock().await;
 
-            // Note: The CondVar is not "Cancellation Safe", yet CondVar would be the most appropriate construct here
-            while vertices_being_written.contains(&self_id) {
-                vertices_being_written = self.worker.vbw_cv.wait(vertices_being_written).await;
+            let mut accessor = self.vertex_lock.lock().await;
+
+            loop {
+                match accessor.state {
+                    VertexState::Free => {
+                        // I can write
+                        break;
+                    }
+                    VertexState::Read => {
+                        let reading = &accessor.reading;
+                        if !(reading.len() == 1
+                            && reading.keys().next().unwrap().eq(&thread::current().id()))
+                        {
+                            accessor = self.vertex_lock_cv.wait(accessor).await;
+                        } else {
+                            // the current thread is the only reader
+                            break;
+                        }
+                    }
+                }
             }
 
-            vertices_being_written.insert(self_id);
-            drop(vertices_being_written);
+            // Note: The CondVar is not "Cancellation Safe", yet CondVar would be the most appropriate construct here
 
             // now we have passed the filter
-
-            let mut_self = self as *const Self as *mut Self;
             unsafe {
-                old_val = (*mut_self).data.take();
-                (*mut_self).data = Some(data)
+                old_val = self.data.get().replace(data);
             };
-
-            // let others know I am done
-            let mut vertices_being_written: MutexGuard<HashSet<VertexID>> =
-                self.worker.vertices_being_written.lock().await;
-            vertices_being_written.remove(&self_id);
-            self.worker.vbw_cv.notify_one();
 
             old_val
         }
@@ -406,4 +428,89 @@ pub enum VertexKind {
     Local,
     Remote,
     Borrowed,
+}
+
+/*
+   New as of 02/06/2024
+
+   Implementing the logic to return a reference who's lifetime is "checked" in runtim.
+
+*/
+
+#[derive(Debug)]
+struct MyUnsafeCell<T>(UnsafeCell<T>);
+
+unsafe impl<T> Sync for MyUnsafeCell<T> {}
+
+impl<T> MyUnsafeCell<T> {
+    fn new(data: T) -> MyUnsafeCell<T> {
+        MyUnsafeCell(UnsafeCell::new(data))
+    }
+
+    unsafe fn get(&self) -> &mut T {
+        &mut *self.0.get()
+    }
+}
+
+pub struct SafeDataReference<'a, 'b, T: DeserializeOwned + Serialize + Debug + Default, V: Debug> {
+    pub data: &'a Option<Data<T>>,
+    parent: &'b LocalVertex<T, V>,
+}
+
+// Implement the Deref trait for MyType
+impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Deref
+    for SafeDataReference<'_, '_, T, V>
+{
+    type Target = Option<Data<T>>;
+
+    // Implement the dereference function
+    fn deref(&self) -> &Self::Target {
+        &self.data // Return a reference to the inner value
+    }
+}
+
+// TODO: Sadly this is not automatically called, will have to implement myself...
+#[async_trait]
+impl<T: DeserializeOwned + Serialize + Debug + Default + Send + Sync, V: Debug + Send + Sync>
+    AsyncDrop for SafeDataReference<'_, '_, T, V>
+{
+    async fn async_drop(&mut self) {
+        println!("dropping!");
+        let mut accessor = self.parent.vertex_lock.lock().await;
+        match accessor.reading.entry(thread::current().id()) {
+            Entry::Occupied(entry) => {
+                if *entry.get() <= 1 {
+                    // If the count is 1 or less, remove the key
+                    entry.remove();
+
+                    // If no more keys, reset the state
+                    if accessor.reading.is_empty() {
+                        accessor.state = VertexState::Free;
+                    }
+                } else {
+                    // Otherwise, decrement the count by 1
+                    *entry.into_mut() -= 1;
+                }
+            }
+            Entry::Vacant(_) => {
+                // If the key does not exist, there's nothing to decrement
+                panic!("An entry should exist!")
+            }
+        };
+        println!("Nice dropping!");
+        self.parent.vertex_lock_cv.notify_all();
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct VertexAccessor {
+    state: VertexState,
+    reading: HashMap<ThreadId, usize>,
+}
+
+#[derive(Default, Debug)]
+pub enum VertexState {
+    #[default]
+    Free,
+    Read,
 }

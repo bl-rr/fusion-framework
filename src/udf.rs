@@ -14,6 +14,7 @@ use crate::datastore::DataStore;
 use crate::vertex::*;
 use crate::UserDefinedFunction;
 
+use async_dropper::AsyncDrop;
 use async_trait::async_trait;
 use hashbrown::HashSet;
 use serde::de::DeserializeOwned;
@@ -47,7 +48,7 @@ impl UserDefinedFunction<isize, Option<u64>, isize> for GraphSum {
         aux_info: Option<u64>,
     ) -> isize {
         let mut count = Data(0);
-        count += vertex.get_val().as_ref().unwrap().0;
+        count += (*vertex.get_val().await).as_ref().unwrap().0;
 
         for sub_graph_root_id in vertex.children().iter() {
             count += data_store
@@ -85,7 +86,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);
-        count += vertex.get_val().as_ref().unwrap().0;
+        count += (*vertex.get_val().await).as_ref().unwrap().0;
 
         let aux_info = aux_info.unwrap();
 
@@ -230,11 +231,14 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
         data_store: &DataStore<isize, SLASInfo>,
         aux_info: bool,
     ) -> SLASInfo {
+        let mut val = vertex.get_val().await;
+        println!("\n{:?}\n", vertex);
+
         if vertex.children().is_empty() {
             // I am the leaf
             return SLASInfo {
-                max_val: vertex.get_val().clone().unwrap(),
-                min_val: vertex.get_val().clone().unwrap(),
+                max_val: (*val).clone().unwrap(),
+                min_val: (*val).clone().unwrap(),
                 max_id: vertex.id,
                 min_id: vertex.id,
             };
@@ -249,8 +253,8 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
         }
 
         let mut res = SLASInfo {
-            max_val: vertex.get_val().clone().unwrap(),
-            min_val: vertex.get_val().clone().unwrap(),
+            max_val: (*val).clone().unwrap(),
+            min_val: (*val).clone().unwrap(),
             max_id: vertex.id,
             min_id: vertex.id,
         };
@@ -265,6 +269,9 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
                 res.min_id = result.min_id
             }
         }
+
+        val.async_drop().await;
+        println!("\n{:?}\n", vertex);
 
         // not the root
         if !aux_info {

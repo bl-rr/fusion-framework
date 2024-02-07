@@ -305,7 +305,7 @@ async fn main() {
     let mut data_store = DataStore::new(worker.clone());
 
     // use graph builder to build the graph based on machine_id
-    build_graph_integer_data(&mut data_store, machine_id, worker.clone()).await;
+    build_graph_integer_data(&mut data_store, machine_id, worker.clone());
     println!("Graph built for testing");
 
     let data_store = Arc::new(data_store);

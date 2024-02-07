@@ -12,13 +12,11 @@ use core::fmt::Debug;
 use crate::rpc::RPCResPayload;
 use crate::vertex::*;
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 use serde::{de::DeserializeOwned, Serialize};
-use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
-use tokio_condvar::Condvar;
 use uuid::Uuid;
 
 /*
@@ -32,9 +30,6 @@ pub struct Worker<T: DeserializeOwned + Serialize + Default, V: Debug> {
     pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
     pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<RPCResPayload<T, V>>>>>, // Note: maybe make the result either (V, or Data<T>, or T)
-    pub vertices_being_written: Arc<Mutex<HashSet<VertexID>>>,
-    pub map_being_written: Arc<Mutex<bool>>,
-    pub vbw_cv: Arc<Condvar>,
 }
 
 impl<T: DeserializeOwned + Serialize + Default, V: Debug> Worker<T, V> {
@@ -46,9 +41,6 @@ impl<T: DeserializeOwned + Serialize + Default, V: Debug> Worker<T, V> {
             sending_streams: RwLock::new(HashMap::new()),
             rpc_sending_streams: RwLock::new(HashMap::new()),
             result_multiplexing_channels: RwLock::new(HashMap::new()),
-            vertices_being_written: Arc::new(Mutex::new(HashSet::new())),
-            map_being_written: Arc::new(Mutex::new(false)),
-            vbw_cv: Arc::new(Condvar::new()),
         }
     }
 }

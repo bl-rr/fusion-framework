@@ -13,6 +13,7 @@ zerocopy = "0.7.32"
 async-trait = { version = "0.1.77", features = [] }
 hashbrown = { version = "0.14.3" , features = ["serde"]}
 tokio-condvar = "0.1.0"
+async-dropper = { version = "0.3.1", features = ["tokio", "simple"] }
 
 [dependencies.uuid]
 version = "1.6.1"
