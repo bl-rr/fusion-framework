@@ -23,8 +23,6 @@ use tokio::sync::Mutex;
 
 pub struct DataStore<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> {
     pub(crate) map: HashMap<VertexID, Vertex<T, V>>,
-    pub(crate) new_nodes: Mutex<Vec<Vertex<T, V>>>,
-    pub(crate) nodes_to_delete: Mutex<HashSet<VertexID>>,
     pub(crate) next_id: AtomicU32,
 } // vertex_id -> vertex mapping
 
@@ -46,8 +44,6 @@ impl<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> DataStore<T, V
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            new_nodes: Default::default(),
-            nodes_to_delete: Default::default(),
             next_id: AtomicU32::new(0),
         }
     }
@@ -104,27 +100,6 @@ impl<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> DataStore<T, V
     // Getter, assumes no error
     pub fn get_vertex_by_id(&self, v_id: &VertexID) -> &Vertex<T, V> {
         self.map.get(v_id).expect("node not found")
-    }
-
-    pub async fn update(&mut self) {
-        // TODO: Implement Actual update logic
-        let mut new_nodes = self.new_nodes.lock().await;
-        let mut nodes_to_delete = self.nodes_to_delete.lock().await;
-
-        for new_node in new_nodes.drain(..) {
-            // todo
-            let parent = self
-                .map
-                .get_mut(new_node.parents().iter().next().unwrap())
-                .unwrap();
-            parent.edges_mut().insert(new_node.id);
-            parent.children_mut().insert(new_node.id);
-
-            self.map.insert(new_node.id, new_node);
-            self.next_id.fetch_add(1, Ordering::Relaxed);
-        }
-
-        for old_node in nodes_to_delete.drain() {}
     }
 
     // perhaps provide interfaces for later on adding to the datastore during run-time.

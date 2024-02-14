@@ -371,7 +371,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
     }
 
     pub async fn remove_self(&self, data_store: &DataStore<T, V>, self_id: VertexID) {
-        data_store.nodes_to_delete.lock().await.insert(self_id);
+        unimplemented!()
     }
 }
 
