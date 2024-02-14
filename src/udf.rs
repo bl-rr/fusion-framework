@@ -19,6 +19,7 @@ use hashbrown::HashSet;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::ops::AddAssign;
+use std::sync::Arc;
 
 /* *********** Starting of User's Playground *********** */
 
@@ -43,21 +44,32 @@ impl UserDefinedFunction<isize, Option<u64>, isize> for GraphSum {
     async fn execute(
         &self,
         vertex: &Vertex<isize, isize>,
-        data_store: &DataStore<isize, isize>,
+        data_store: Arc<DataStore<isize, isize>>,
         aux_info: Option<u64>,
     ) -> isize {
-        if vertex.children().is_empty() {
-            vertex.add_child(data_store, Data(10000)).await;
-        }
         let mut count = Data(0);
+
+        /* wrong placement of code, actually caught
+           if vertex.children().is_empty() {
+               println!("attempt adding");
+               vertex.add_child(data_store.clone(), Data(10000)).await;
+               println!("adding done");
+           }
+        */
+
         count += (*vertex.get_val().await).as_ref().unwrap().0;
 
         for sub_graph_root_id in vertex.children().iter() {
             count += data_store
                 .get_vertex_by_id(sub_graph_root_id)
-                .apply_function(self, data_store, aux_info.clone())
+                .apply_function(self, data_store.clone(), aux_info.clone())
                 .await;
         }
+
+        if vertex.children().is_empty() {
+            vertex.add_child(data_store.clone(), Data(10000)).await;
+        }
+
         count.0
     }
 }
@@ -84,7 +96,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum
     async fn execute(
         &self,
         vertex: &Vertex<isize, isize>,
-        data_store: &DataStore<isize, isize>,
+        data_store: Arc<DataStore<isize, isize>>,
         aux_info: Option<NMASInfo>,
     ) -> isize {
         let mut count = Data(0);
@@ -109,7 +121,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum
                         .get_vertex_by_id(neighbor_id)
                         .apply_function(
                             self,
-                            data_store,
+                            data_store.clone(),
                             Some(NMASInfo {
                                 source: Some(vertex.id),
                                 distance: aux_info.distance - 1,
@@ -131,7 +143,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum
                                 .get_vertex_by_id(connected_nodes_id)
                                 .apply_function(
                                     self,
-                                    data_store,
+                                    data_store.clone(),
                                     Some(NMASInfo {
                                         source: None,
                                         distance: aux_info.distance,
@@ -154,7 +166,7 @@ impl UserDefinedFunction<isize, Option<NMASInfo>, isize> for NaiveMaxAdjacentSum
                             .get_vertex_by_id(neighbor_id)
                             .apply_function(
                                 self,
-                                data_store,
+                                data_store.clone(),
                                 Some(NMASInfo {
                                     source: Some(vertex.id),
                                     distance: aux_info.distance - 1,
@@ -230,11 +242,10 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
     async fn execute(
         &self,
         vertex: &Vertex<isize, SLASInfo>,
-        data_store: &DataStore<isize, SLASInfo>,
+        data_store: Arc<DataStore<isize, SLASInfo>>,
         aux_info: bool,
     ) -> SLASInfo {
         let val = vertex.get_val().await;
-        println!("\n{:?}\n", vertex);
 
         if vertex.children().is_empty() {
             // I am the leaf
@@ -249,7 +260,7 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
         for children_id in vertex.children().iter() {
             let result = data_store
                 .get_vertex_by_id(children_id)
-                .apply_function(self, data_store, false)
+                .apply_function(self, data_store.clone(), false)
                 .await;
             results.push(result);
         }
@@ -271,8 +282,6 @@ impl UserDefinedFunction<isize, bool, SLASInfo> for SwapLargestAndSmallest {
                 res.min_id = result.min_id
             }
         }
-
-        println!("\n{:?}\n", vertex);
 
         // not the root
         if !aux_info {

@@ -1,3 +1,4 @@
+#![feature(get_mut_unchecked)]
 /* lib.rs
 
    Amalgamation of imports, to keep everything under the same crate root.
@@ -8,6 +9,7 @@
 */
 
 use core::fmt::Debug;
+use std::sync::Arc;
 
 use crate::datastore::DataStore;
 use crate::vertex::Vertex;
@@ -35,7 +37,7 @@ pub trait UserDefinedFunction<
     async fn execute(
         &self,
         vertex: &Vertex<T, V>,
-        data_store: &DataStore<T, V>,
+        data_store: Arc<DataStore<T, V>>,
         auxiliary_information: U,
     ) -> V;
 }

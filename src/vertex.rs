@@ -73,7 +73,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
     >(
         &self,
         udf: &F,
-        data_store: &DataStore<T, V>,
+        data_store: Arc<DataStore<T, V>>,
         auxiliary_information: U,
     ) -> V {
         match &self.v_type {
@@ -82,6 +82,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
             }
             VertexType::Remote(remote_vertex) => {
                 // Delegate to the remote machine: rpc here
+
                 remote_vertex
                     .remote_execute(self.id, auxiliary_information)
                     .await
@@ -169,7 +170,7 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Vertex<T, V> {
             }
         }
     }
-    pub async fn add_child(&self, data_store: &DataStore<T, V>, data: Data<T>) {
+    pub async fn add_child(&self, data_store: Arc<DataStore<T, V>>, data: Data<T>) {
         match &self.v_type {
             VertexType::Local(local_v) | VertexType::Borrowed(local_v) => {
                 local_v.add_child(data_store, self.id, data).await;
@@ -335,21 +336,38 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> LocalVertex<T,
         }
     }
 
-    pub async fn add_child(&self, data_store: &DataStore<T, V>, self_id: VertexID, data: Data<T>) {
-        data_store.new_nodes.lock().await.push(Vertex {
-            id: data_store.next_id.fetch_add(1, Ordering::Relaxed),
-            v_type: VertexType::Local(LocalVertex {
-                incoming_edges: HashSet::from([self_id]),
-                outgoing_edges: Default::default(),
-                edges: HashSet::from([self_id]),
-                data: Arc::new(MyUnsafeCell::new(Some(data))),
-                borrowed_in: false,
-                leased_out: false,
-                vertex_lock: Default::default(),
-                vertex_lock_cv: Default::default(),
-                _marker: Default::default(),
-            }),
-        })
+    pub async fn add_child(
+        &self,
+        mut data_store: Arc<DataStore<T, V>>,
+        self_id: VertexID,
+        data: Data<T>,
+    ) {
+        // this is sound, due to the single-threaded behavior
+        // Discussion: https://github.com/rust-lang/rust/issues/63292
+        let data_store = unsafe { Arc::get_mut_unchecked(&mut data_store) };
+        let new_id = data_store.next_id.fetch_add(1, Ordering::Relaxed);
+        data_store.add_vertex(
+            new_id,
+            Vertex {
+                id: new_id,
+                v_type: VertexType::Local(LocalVertex {
+                    incoming_edges: HashSet::from([self_id]),
+                    outgoing_edges: Default::default(),
+                    edges: HashSet::from([self_id]),
+                    data: Arc::new(MyUnsafeCell::new(Some(data))),
+                    borrowed_in: false,
+                    leased_out: false,
+                    vertex_lock: Default::default(),
+                    vertex_lock_cv: Default::default(),
+                    _marker: Default::default(),
+                }),
+            },
+        );
+        let temp = data_store.map.get_mut(&self_id).unwrap();
+        if let VertexType::Local(v) = &mut temp.v_type {
+            v.edges_mut().insert(new_id);
+            v.children_mut().insert(new_id);
+        }
     }
 
     pub async fn remove_self(&self, data_store: &DataStore<T, V>, self_id: VertexID) {
@@ -568,7 +586,6 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> Default
 
 impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> SafeDataReference<'_, '_, T, V> {
     async fn async_drop(&mut self) {
-        println!("dropping!");
         let mut accessor = self.parent.unwrap().vertex_lock.lock().await;
         match accessor.reading.entry(thread::current().id()) {
             Entry::Occupied(entry) => {
@@ -590,7 +607,6 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> SafeDataRefere
                 panic!("An entry should exist!")
             }
         };
-        println!("Nice dropping!");
         self.parent.unwrap().vertex_lock_cv.notify_all();
     }
 }

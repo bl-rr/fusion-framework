@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct DataStore<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> {
-    map: HashMap<VertexID, Vertex<T, V>>,
+    pub(crate) map: HashMap<VertexID, Vertex<T, V>>,
     pub(crate) new_nodes: Mutex<Vec<Vertex<T, V>>>,
     pub(crate) nodes_to_delete: Mutex<HashSet<VertexID>>,
     pub(crate) next_id: AtomicU32,
