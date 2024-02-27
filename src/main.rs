@@ -82,7 +82,7 @@ async fn handle_rpc_receiving_stream<
     V: Serialize + Send + Sync + 'static + Debug,
 >(
     id: Arc<MachineID>,
-    stream: Arc<Mutex<TcpStream>>,
+    mut stream: Arc<TcpStream>,
     worker: Arc<Worker<T, V>>,
     data_store: Arc<DataStore<T, V>>,
     _type: &X,
@@ -93,7 +93,7 @@ async fn handle_rpc_receiving_stream<
     // construct the buffer to receive fixed size of bytes for RPC
     let mut cmd = vec![0u8; dummy_rpc_len];
 
-    let mut stream = stream.lock().await;
+    let mut stream = Arc::get_mut(&mut stream).unwrap();
 
     while let Ok(_) = stream.read_exact(&mut cmd).await {
         match bincode::deserialize::<RPC>(&cmd).expect("Incorrect RPC format") {
@@ -268,7 +268,7 @@ async fn main() {
                 .expect(&*format!("Failed to connect to {remote_address}"));
 
             // fill in the data structures
-            rpc_receiving_streams.insert(Arc::new(2), Arc::new(Mutex::new(rpc_receiving_stream)));
+            rpc_receiving_streams.insert(Arc::new(2), Arc::new(rpc_receiving_stream));
             data_receiving_streams.push(incoming_stream);
             worker
                 .sending_streams
@@ -305,7 +305,7 @@ async fn main() {
             println!("New connection from {socket_addr}");
 
             // fill in the data structures
-            rpc_receiving_streams.insert(Arc::new(1), Arc::new(Mutex::new(rpc_receiving_stream)));
+            rpc_receiving_streams.insert(Arc::new(1), Arc::new(rpc_receiving_stream));
             data_receiving_streams.push(incoming_stream);
             worker
                 .sending_streams
@@ -338,26 +338,24 @@ async fn main() {
     let dummy_rpc_len = bincode::serialize(&dummy_rpc).unwrap().len();
 
     // handle rpc receiving streams
-    for (id, stream) in rpc_receiving_streams.iter() {
+    for (id, stream) in rpc_receiving_streams.into_iter() {
         let worker = worker.clone();
         let data_store = data_store.clone();
-        let stream = stream.clone();
-        let id = id.clone();
         let tx_req = tx_update_req.clone();
         let tx_res = tx_update_res.clone();
 
         local.spawn_local(async move {
-            // handle_rpc_receiving_stream(
-            //     id,
-            //     stream,
-            //     worker,
-            //     data_store,
-            //     &GraphSum,
-            //     dummy_rpc_len,
-            //     tx_req,
-            //     tx_res,
-            // )
-            // .await;
+            handle_rpc_receiving_stream(
+                id,
+                stream,
+                worker,
+                data_store,
+                &GraphSum,
+                dummy_rpc_len,
+                tx_req,
+                tx_res,
+            )
+            .await;
 
             // handle_rpc_receiving_stream(
             //     id,
@@ -371,17 +369,17 @@ async fn main() {
             // )
             // .await;
 
-            handle_rpc_receiving_stream(
-                id,
-                stream,
-                worker,
-                data_store,
-                &SwapLargestAndSmallest,
-                dummy_rpc_len,
-                tx_req,
-                tx_res,
-            )
-            .await;
+            // handle_rpc_receiving_stream(
+            //     id,
+            //     stream,
+            //     worker,
+            //     data_store,
+            //     &SwapLargestAndSmallest,
+            //     dummy_rpc_len,
+            //     tx_req,
+            //     tx_res,
+            // )
+            // .await;
         });
     }
 
@@ -416,10 +414,14 @@ async fn main() {
             let root = data_store.get_vertex_by_id(&0);
             let _distance = 2;
 
-            // let result = root
-            //     .apply_function(&GraphSum, data_store.clone(), None)
-            //     .await;
-            // println!("[1]: The graph sum is: {result}");
+            let result = root
+                .apply_function(&GraphSum, data_store.clone(), None)
+                .await;
+            println!("[1]: The graph sum is: {result}");
+            let result = root
+                .apply_function(&GraphSum, data_store.clone(), None)
+                .await;
+            println!("[2]: The graph sum is: {result}");
 
             // let result = root
             //     .apply_function(
@@ -434,30 +436,11 @@ async fn main() {
             //     .await;
             // println!("The Max Adjacent Sum for {_distance} is: {result}");
 
-            let result = root
-                .apply_function(&SwapLargestAndSmallest, data_store.clone(), true)
-                .await;
-            println!("the result to swap largest and smallest is: {:?}", result);
-            println!("AFTER!\n{:?}\n\n", data_store);
-
-            // update_global_data_store(
-            //     &mut rpc_receiving_streams,
-            //     &tx_update_req,
-            //     &tx_update_res,
-            //     &mut rx_update_res,
-            //     &worker,
-            //     &mut data_store,
-            //     dummy_rpc_len,
-            //     &mut data_store_holders,
-            // )
-            // .await;
-
-            // let root = data_store.get_vertex_by_id(&0);
-            // let _distance = 2;
             // let result = root
-            //     .apply_function(&GraphSum, data_store.clone(), None)
+            //     .apply_function(&SwapLargestAndSmallest, data_store.clone(), true)
             //     .await;
-            // println!("[2]: The graph sum is: {result}");
+            // println!("the result to swap largest and smallest is: {:?}", result);
+            // println!("AFTER!\n{:?}\n\n", data_store);
         } else {
             tokio::time::sleep(Duration::from_secs(2)).await;
             println!("AFTER!\n{:?}\n\n", data_store);
