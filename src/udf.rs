@@ -10,6 +10,10 @@
    Creation Date: 1/14/2024
 */
 
+extern crate alloc;
+use alloc::sync::Arc;
+use core::ops::AddAssign;
+
 use crate::datastore::DataStore;
 use crate::vertex::*;
 use crate::UserDefinedFunction;
@@ -18,8 +22,6 @@ use async_trait::async_trait;
 use hashbrown::HashSet;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::ops::AddAssign;
-use std::sync::Arc;
 
 /* *********** Starting of User's Playground *********** */
 
@@ -227,12 +229,12 @@ impl<T: DeserializeOwned + Ord + Default> PartialEq for Data<T> {
 }
 impl<T: DeserializeOwned + Ord + Default> Eq for Data<T> {}
 impl<T: DeserializeOwned + Ord + Default> PartialOrd for Data<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 impl<T: DeserializeOwned + Ord + Default> Ord for Data<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.0.cmp(&other.0)
     }
 }

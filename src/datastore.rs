@@ -7,7 +7,10 @@
    Creation Date: 1/30/2024
 */
 
+extern crate alloc;
+use alloc::sync::Arc;
 use core::fmt::{self, Debug};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::vertex::{
     Data, LocalVertex, MachineID, RemoteVertex, Vertex, VertexID, VertexKind, VertexType,
@@ -17,9 +20,6 @@ use crate::worker::Worker;
 use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 pub struct DataStore<T: Serialize + DeserializeOwned + Debug + Default, V: Debug> {
     pub(crate) map: HashMap<VertexID, Vertex<T, V>>,

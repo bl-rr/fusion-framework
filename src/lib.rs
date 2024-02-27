@@ -8,8 +8,9 @@
    Creation Date: 1/14/2024
 */
 
+extern crate alloc;
+use alloc::sync::Arc;
 use core::fmt::Debug;
-use std::sync::Arc;
 
 use crate::datastore::DataStore;
 use crate::vertex::Vertex;

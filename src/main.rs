@@ -6,6 +6,8 @@
    Creation Date: 1/14/2024
 */
 
+extern crate alloc;
+use alloc::sync::Arc;
 use core::fmt::Debug;
 
 use fusion_framework::datastore::{build_graph_integer_data, DataStore};
@@ -15,11 +17,10 @@ use fusion_framework::vertex::{Data, MachineID, VertexID};
 use fusion_framework::worker::Worker;
 use fusion_framework::UserDefinedFunction;
 
+use core::time::Duration;
 use hashbrown::{HashMap, HashSet};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Sender};

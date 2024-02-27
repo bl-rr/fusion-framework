@@ -7,6 +7,11 @@
 */
 use core::cell::UnsafeCell;
 use core::fmt::{self, Debug};
+extern crate alloc;
+use alloc::sync::Arc;
+use core::marker::PhantomData;
+use core::ops::Deref;
+use core::sync::atomic::Ordering;
 
 use crate::datastore::DataStore;
 use crate::rpc::{RPCResPayload, RPC};
@@ -15,10 +20,6 @@ use crate::{worker::Worker, UserDefinedFunction};
 use hashbrown::hash_map::Entry;
 use hashbrown::{HashMap, HashSet};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::marker::PhantomData;
-use std::ops::Deref;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::thread;
 use std::thread::ThreadId;
 use tokio::io::AsyncWriteExt;
