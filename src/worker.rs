@@ -7,6 +7,7 @@
    Major Revision: 1/30/2024
 */
 
+use alloc::sync::Arc;
 use core::fmt::Debug;
 
 use crate::rpc::RPCResPayload;
@@ -27,8 +28,8 @@ use uuid::Uuid;
 */
 pub struct Worker<T: DeserializeOwned + Serialize + Default, V: Debug> {
     // pub graph: HashMap<VertexID, Vertex<T>>, // vertex_id -> vertex mapping
-    pub sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
-    pub rpc_sending_streams: RwLock<HashMap<MachineID, Mutex<TcpStream>>>,
+    pub sending_streams: Arc<HashMap<MachineID, Arc<TcpStream>>>,
+    pub rpc_sending_streams: Arc<HashMap<MachineID, Arc<TcpStream>>>,
     pub result_multiplexing_channels: RwLock<HashMap<Uuid, Mutex<Sender<RPCResPayload<T, V>>>>>, // Note: maybe make the result either (V, or Data<T>, or T)
 }
 
@@ -38,8 +39,8 @@ impl<T: DeserializeOwned + Serialize + Default, V: Debug> Worker<T, V> {
     */
     pub fn new() -> Self {
         Worker {
-            sending_streams: RwLock::new(HashMap::new()),
-            rpc_sending_streams: RwLock::new(HashMap::new()),
+            sending_streams: Arc::new(HashMap::new()),
+            rpc_sending_streams: Arc::new(HashMap::new()),
             result_multiplexing_channels: RwLock::new(HashMap::new()),
         }
     }

@@ -429,12 +429,16 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> RemoteVertex<T
 
         // Step 3: get lock on the sending stream so that all messages are sent in order, as expected
         //      (using the same rpc stream, send command and the data if necessary)
-        let rpc_sending_streams = self.worker.rpc_sending_streams.read().await;
-        let mut rpc_sending_stream = rpc_sending_streams
+        // let rpc_sending_streams = self.worker.rpc_sending_streams.read().await;
+
+        let mut rpc_sending_stream = self
+            .worker
+            .rpc_sending_streams
             .get(&self.location)
             .unwrap()
-            .lock()
-            .await;
+            .clone();
+
+        let rpc_sending_stream_mut = unsafe { Arc::get_mut_unchecked(&mut rpc_sending_stream) };
 
         // Step 4: Construct the aux_info byte array, the rpc command with aux_info len
         let aux_info = bincode::serialize(&auxiliary_information).unwrap();
@@ -442,14 +446,12 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> RemoteVertex<T
         let command = bincode::serialize(&RPC::Execute(id, vertex_id, aux_info_len)).unwrap();
 
         // Step 5: Send the RPC Command and auxiliary information
-        rpc_sending_stream
+        rpc_sending_stream_mut
             .write_all(&[command, aux_info].concat())
             .await
             .unwrap();
 
         // Step 6: Drop the sender before waiting/blocking/yielding
-        drop(rpc_sending_stream);
-        drop(rpc_sending_streams);
 
         // Step 7: Wait on the receiver and return result
         let rpc_result = rx.recv().await.unwrap();
@@ -482,12 +484,14 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> RemoteVertex<T
 
         // Step 3: get lock on the sending stream so that all messages are sent in order, as expected
         //      (using the same rpc stream, send command and the data if necessary)
-        let rpc_sending_streams = self.worker.rpc_sending_streams.read().await;
-        let mut rpc_sending_stream = rpc_sending_streams
+        let mut rpc_sending_stream = self
+            .worker
+            .rpc_sending_streams
             .get(&self.location)
             .unwrap()
-            .lock()
-            .await;
+            .clone();
+
+        let rpc_sending_stream = Arc::get_mut(&mut rpc_sending_stream).unwrap();
 
         // Step 4: Construct the data byte array, the rpc command with data len
         let data_bytes = bincode::serialize(&data).unwrap();
@@ -501,8 +505,6 @@ impl<T: DeserializeOwned + Serialize + Debug + Default, V: Debug> RemoteVertex<T
             .unwrap();
 
         // Step 6: Drop the sender before waiting/blocking/yielding
-        drop(rpc_sending_stream);
-        drop(rpc_sending_streams);
 
         // Step 7: Wait on the receiver and return result
         let rpc_result = rx.recv().await.unwrap();

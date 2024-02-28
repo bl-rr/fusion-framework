@@ -1,3 +1,4 @@
+#![feature(get_mut_unchecked)]
 /* main.rs
 
    Testing Ground as of now
@@ -124,10 +125,19 @@ async fn handle_rpc_receiving_stream<
                     // construct result that is to be sent back
                     let res: RPCResPayload<T, V> = RPCResPayload::ExecuteResPayload(res);
 
+                    // println!(
+                    //     "{:?}",
+                    //     Arc::get_mut(worker_clone.sending_streams.get(id_clone.as_ref()).unwrap())
+                    // );
+
                     // get sending_stream as mut
-                    let sending_streams = worker_clone.sending_streams.read().await;
-                    let mut sending_stream =
-                        sending_streams.get(id_clone.as_ref()).unwrap().lock().await;
+                    let mut sending_stream = worker_clone
+                        .sending_streams
+                        .get(id_clone.as_ref())
+                        .unwrap()
+                        .clone();
+                    // println!("{:?}", Arc::strong_count(&sending_stream));
+                    let sending_stream = unsafe { Arc::get_mut_unchecked(&mut sending_stream) };
 
                     let res_bytes = bincode::serialize::<RPCResPayload<_, V>>(&res).unwrap();
 
@@ -175,8 +185,9 @@ async fn handle_rpc_receiving_stream<
                 let res_bytes = bincode::serialize::<RPCResPayload<T, _>>(&res).unwrap();
 
                 // get sending_stream as mut
-                let sending_streams = worker.sending_streams.read().await;
-                let mut sending_stream = sending_streams.get(id.as_ref()).unwrap().lock().await;
+                // let sending_streams = worker.sending_streams.read().await;
+                let mut sending_stream = worker.sending_streams.get(id.as_ref()).unwrap().clone();
+                let sending_stream = Arc::get_mut(&mut sending_stream).unwrap();
 
                 // construct session header
                 let session_header_for_result = RPCResponseHeader {
@@ -238,7 +249,7 @@ async fn main() {
     println!("Listening on {}", local_address);
 
     // Create new worker instance
-    let worker = Worker::new();
+    let mut worker = Worker::new();
     // other communication channel
     let (tx_update_req, mut rx_update_req) = channel::<MachineID>(100);
     let (tx_update_res, mut rx_update_res) = channel::<()>(100);
@@ -270,16 +281,16 @@ async fn main() {
             // fill in the data structures
             rpc_receiving_streams.insert(Arc::new(2), Arc::new(rpc_receiving_stream));
             data_receiving_streams.push(incoming_stream);
-            worker
-                .sending_streams
-                .write()
-                .await
-                .insert(2, Mutex::new(outgoing_stream));
-            worker
-                .rpc_sending_streams
-                .write()
-                .await
-                .insert(2, Mutex::new(rpc_sending_stream));
+
+            {
+                let sending_streams_mut = Arc::get_mut(&mut worker.sending_streams).unwrap();
+                sending_streams_mut.insert(2, Arc::new(outgoing_stream));
+            }
+            {
+                let rpc_sending_streams_mut =
+                    Arc::get_mut(&mut worker.rpc_sending_streams).unwrap();
+                rpc_sending_streams_mut.insert(2, Arc::new(rpc_sending_stream));
+            }
         }
         2 => {
             // (2) initiates outgoing connections first, needs to be launched second
@@ -307,16 +318,15 @@ async fn main() {
             // fill in the data structures
             rpc_receiving_streams.insert(Arc::new(1), Arc::new(rpc_receiving_stream));
             data_receiving_streams.push(incoming_stream);
-            worker
-                .sending_streams
-                .write()
-                .await
-                .insert(1, Mutex::new(outgoing_stream));
-            worker
-                .rpc_sending_streams
-                .write()
-                .await
-                .insert(1, Mutex::new(rpc_sending_stream));
+            {
+                let sending_streams_mut = Arc::get_mut(&mut worker.sending_streams).unwrap();
+                sending_streams_mut.insert(1, Arc::new(outgoing_stream));
+            }
+            {
+                let rpc_sending_streams_mut =
+                    Arc::get_mut(&mut worker.rpc_sending_streams).unwrap();
+                rpc_sending_streams_mut.insert(1, Arc::new(rpc_sending_stream));
+            }
         }
         _ => unimplemented!(),
     }
