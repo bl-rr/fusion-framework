@@ -42,3 +42,6 @@ pub trait UserDefinedFunction<
         auxiliary_information: U,
     ) -> V;
 }
+
+#[async_trait]
+pub trait AsyncStream {}
